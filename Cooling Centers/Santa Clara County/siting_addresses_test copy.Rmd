@@ -1,0 +1,525 @@
+---
+title: "Address-Level Vaccine Siting"
+author: "Tiffany Zhu"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(sf)
+library(mapview)
+library(mapboxapi)
+library(leaflet)
+library(leafem)
+library(tigris)
+library(raster)
+library(fasterize)
+library(stars)
+setwd("/Users/tiffanyzhu/Documents/GitHub/climate/Tiffany/siting_by_addresses")
+```
+
+# Data Processing
+
+```{r data}
+# Load all addresses
+addresses_by_demographics <- readRDS("/Volumes/GoogleDrive/Shared drives/SFBI-Restricted/Safegraph/218y/data/addresses_by_demographics.rds")
+
+# Choose top n addresses by number of senior citizens
+addresses <- addresses_by_demographics %>% 
+  dplyr::select(-prop_65_and_older) %>% 
+  arrange(desc(n_65_and_older)) %>%
+  filter(!st_is_empty(.))
+# %>% 
+#   head(500)
+# Note: full count of addresses is 140293
+```
+
+```{r isochrone generation, eval=F}
+# Generate new 5 and 10 minute isochrones
+
+num_rows <- 140293 # Enter as many rows as necessary
+
+# Create 5 min isochrones
+walk5 <- NULL
+for (i in 1:num_rows) {
+  # Break down isochrone creation process
+  isochrone <- mb_isochrone(
+    addresses[i,],
+    profile = "walking",
+    time = 5
+    )
+  temp_row = isochrone %>%
+    rename(walk5 = geometry) %>%
+    cbind(addresses[i,] %>% st_transform(4326)) %>%
+    rename(address_location = geometry)
+  walk5 = rbind(walk5, temp_row)
+  
+  # Sleep so as not to crash Mapbox
+  Sys.sleep(5)
+  
+  # Periodically save file
+  if (i %% 10 == 0 | i == num_rows) {
+    saveRDS(walk5, "walk5.rds")
+  }
+  
+  # Track progress
+  if (i %% 50 == 0) {
+    print(i)
+  }
+}
+
+# Create 10 min isochrones
+walk10 <- NULL
+for (i in 1:num_rows) {
+  # Break down isochrone creation process
+  isochrone <- mb_isochrone(
+    addresses[i,],
+    profile = "walking",
+    time = 10
+    )
+  temp_row = isochrone %>%
+    rename(walk10 = geometry) %>%
+    cbind(addresses[i,] %>% st_transform(4326)) %>%
+    rename(address_location = geometry)
+  walk10 = rbind(walk10, temp_row)
+  
+  # Sleep so as not to crash Mapbox
+  Sys.sleep(5)
+  
+  # Periodically save file
+  if (i %% 10 == 0 | i == num_rows) {
+    saveRDS(walk10, "walk10.rds")
+  }
+  
+  # Track progress
+  if (i %% 50 == 0) {
+    print(i)
+  }
+}
+```
+
+```{r donut generation, eval = F}
+# Read in isochrones from saved RDS files
+# Uncomment if loading in existing files
+walk5 = readRDS("walk5.rds")
+walk10 = readRDS("walk10.rds")
+
+# Create donuts representing 5-10 min isochrones
+walk5to10_diff = 1:nrow(walk10) %>%
+  map(function(i){
+    st_difference(walk10[i,], walk5[i,]) %>%
+    st_cast("MULTIPOLYGON")
+  })
+donuts5to10 = do.call(rbind, walk5to10_diff)
+
+# Alternate means of generating donuts. These return different
+# donut geometries.
+# ALTERNATE 1:
+# test_diff = 1:nrow(walk10) %>% 
+#   map(function(i){
+#     ms_erase(walk10[i,], walk5[i,]) %>%
+#     st_cast("MULTIPOLYGON")
+#   }) 
+# testdonuts = do.call(rbind, test_diff) %>% st_cast("MULTIPOLYGON")
+# ALTERNATE 2:
+# testdonuts2 <- ms_erase(walk10, walk5)
+
+# Map donuts
+# mapview(donuts5to10) # Uncomment if running locally
+# Uncomment if running on R Markdown
+leaflet() %>%
+  addTiles() %>%
+  addPolygons(data = donuts5to10,
+              color = "black",
+              fillColor = "purple",
+              fillOpacity = 0.5,
+              opacity = 0.5,
+              weight = 0.5,
+              highlightOptions = highlightOptions(
+                opacity = 1,
+                weight = 1
+              ))
+```
+
+```{r merge addresses with donuts, eval=F}
+# Compile dataset with 5 min isochrones + donuts
+addresses_donuts <- addresses %>%
+  rename(address_location = geometry) %>%
+  cbind(walk5$geometry) %>%
+  rename(walk5 = geometry) %>%
+  cbind(donuts5to10$geometry) %>%
+  rename(walk5to10 = geometry)
+
+# Scale population who can access area within donuts
+addresses_donuts_popadj <- addresses_donuts %>%
+  mutate(
+    n_5to10 = floor(n / 2),
+    n_65_and_older_5to10 = floor(n_65_and_older / 2),
+    n_api_5to10 = floor(n_api / 2),
+    n_black_5to10 = floor(n_black / 2),
+    n_hispanic_5to10 = floor(n_hispanic / 2),
+    n_low_income_hh_5to10 = floor(n_low_income_hh / 2)
+  )
+
+# Save dataset
+saveRDS(addresses_donuts_popadj, "addresses_donuts_popadj.rds")
+
+```
+
+```{r create stacked geometries, eval=F}
+# Reload dataset
+addresses_donuts_popadj <- readRDS("addresses_donuts_popadj.rds")
+
+# Remove geometries representing individual addresses
+addresses_geoms <- addresses_donuts_popadj %>%
+  st_set_geometry(NULL) %>%
+  st_as_sf()
+
+# Reorganize dataset of donuts + holes
+stacked_geometries <- addresses_geoms %>%
+  pivot_longer(cols = starts_with("walk"),
+               names_to = "walking_time",
+               values_to = "walking_dist",
+               names_prefix = "walk") %>%
+  mutate(
+    working_pop_65_and_older =
+      ifelse(
+        walking_time == 5,
+        n_65_and_older,
+        n_65_and_older_5to10
+      )
+  ) %>%
+  st_as_sf() %>%
+  st_cast("MULTIPOLYGON")
+
+# Save dataset
+saveRDS(stacked_geometries, "stacked_geometries.rds")
+```
+
+# Alternate data loading and processing
+
+``` {r Alternate data loading, eval=F}
+
+addresses_by_demographics <- readRDS("/Volumes/GoogleDrive/Shared drives/SFBI-Restricted/Safegraph/218y/data/addresses_by_demographics.rds")
+
+addresses <- addresses_by_demographics %>% 
+  dplyr::select(-prop_65_and_older) %>% 
+  arrange(desc(n_65_and_older)) %>%
+  filter(!st_is_empty(.))
+
+walk5_jing = readRDS("walk5-jing.rds")
+walk5_mv = readRDS("walk5_MV.rds")
+walk5 = rbind(walk5_jing, walk5_mv)
+
+# Issue: addresses has 140293 observations,
+# while walk5 has 140398 observations (duplicates?).
+# But when we remove duplicates from walk5,
+# we only end up with 139403, missing ~1000 observations.
+## This is a very rough fix -- need to figure out
+## why there are more isochrones than addresses
+addresses_geoms <- addresses %>%
+  st_set_geometry(NULL) %>%
+  cbind(walk5[1:140293,]$geometry) %>%
+  rename(walk5 = geometry) %>%
+  st_as_sf() %>%
+  filter(!st_is_empty(walk5)) %>%
+  st_cast("MULTIPOLYGON")
+saveRDS(addresses_geoms, "addresses_geoms.rds")
+
+# Reset projection of stacked_geometries
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs" # EGPS 26910
+
+stacked_test = addresses_geoms %>%
+  st_transform(projection)
+stacked_test = saveRDS(stacked_test, "stacked_test.rds")
+
+```
+
+# Alternate data loading #2
+
+```{r}
+
+addresses_by_demographics <- readRDS("/Volumes/GoogleDrive/Shared drives/SFBI-Restricted/Safegraph/218y/data/addresses_by_demographics.rds")
+
+addresses <- addresses_by_demographics %>% 
+  dplyr::select(-prop_65_and_older) %>% 
+  arrange(desc(n_65_and_older)) %>%
+  filter(!st_is_empty(.))
+
+walk_all = readRDS("walk_osrm.rds")
+
+# Adjust for donut values
+walk_all_adj <- walk_all %>%
+  mutate(
+    n_final = 
+      ifelse(
+        min == 5,
+        floor(n / 2),
+        n
+      ),
+    n_65_and_older_final = 
+      ifelse(
+        min == 5,
+        floor(n_65_and_older / 2),
+        n_65_and_older
+      ),
+    n_api_final = 
+      ifelse(
+        min == 5,
+        floor(n_api / 2),
+        n_api
+      ),
+    n_black_final = 
+      ifelse(
+        min == 5,
+        floor(n_black / 2),
+        n_black
+      ),
+    n_hispanic_final = 
+      ifelse(
+        min == 5,
+        floor(n_hispanic / 2),
+        n_hispanic
+      ),
+    n_low_income_hh_final = 
+      ifelse(
+        min == 5,
+        floor(n_low_income_hh / 2),
+        n_low_income_hh
+      )
+  ) %>%
+  dplyr::select(-address_location)
+
+# Reset projection of stacked_geometries
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs" # EGPS 26910
+
+geoms_to_plot = walk_all_adj %>%
+  st_transform(projection)
+
+saveRDS(geoms_to_plot, "geoms_to_plot.rds")
+
+```
+
+
+# Plot areas most accessible to senior citizens
+
+## Method 1: fasterize package
+
+```{r rasters - fasterize}
+# Reload dataset
+stacked_geometries = readRDS("stacked_geometries.rds")
+
+# Reset projection of stacked_geometries
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs" # EGPS 26910
+stacked_test = stacked_geometries %>%
+  st_transform(projection)
+
+# Convert to rasters using fasterize
+start_time = Sys.time()
+raster_geoms <- fasterize(stacked_test, 
+                          raster(stacked_test, res = 300), 
+                          field = "working_pop_65_and_older",
+                          fun = "sum")
+end_time = Sys.time()
+print(end_time - start_time)
+
+# Map rasters
+start_time = Sys.time()
+# mapview(raster_geoms) # Uncomment if running locally
+# Uncomment if running on R Markdown
+pal <- colorNumeric(c("#fde0dd", "#fa9fb5", "#c51b8a"),
+                    values(raster_geoms),
+                    na.color = "transparent")
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addRasterImage(raster_geoms,
+                 colors = pal,
+                 opacity = 0.8) %>%
+  addLegend(pal = pal,
+            values = values(raster_geoms),
+            title = "Accessibility")
+end_time = Sys.time()
+print(end_time - start_time)
+
+# At 1000 addresses, 2000 geometries, and res = 300,
+# total time is less than 5 seconds
+```
+
+```{r fasterize with alternate dataset}
+
+# geoms_to_plot = readRDS("geoms_to_plot.rds")
+
+# Convert to rasters using fasterize
+raster_geoms <- fasterize(geoms_to_plot, 
+                          raster(geoms_to_plot, res = 200), 
+                          field = "n_65_and_older_final",
+                          fun = "sum")
+saveRDS(raster_geoms, "raster_geoms.rds")
+
+# Map rasters
+# mapview(raster_geoms) # Uncomment if running locally
+# Uncomment if running on R Markdown
+pal <- colorNumeric(c("#fde0dd", "#fa9fb5", "#c51b8a"),
+                    values(raster_geoms),
+                    na.color = "transparent")
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addRasterImage(raster_geoms,
+                 colors = pal,
+                 opacity = 0.6) %>%
+  addLegend(pal = pal,
+            values = values(raster_geoms),
+            title = "Estimated Population<br>
+                     Able to Access Area") %>%
+  setView(lng = -121.90357379461862,
+          lat = 37.284362741182556,
+          zoom = 11)
+# %>%
+  # setView(lng = -121.92357379461862,
+  #         lat = 37.334362741182556,
+  #         zoom = 12)
+
+
+# At 1000 addresses, 2000 geometries, and res = 300,
+# total time is less than 5 seconds
+
+```
+
+## Method 2: stars package
+
+```{r rasters - stars data processing, eval=F, include=F}
+# Using Derek's method with stars package
+
+# Reload stacked_geometries
+stacked_geometries = readRDS("stacked_geometries.rds")
+
+# Reset projection of stacked_geometries
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs" # EPGS 26910
+stacked_test = stacked_geometries %>%
+  transmute(value = working_pop_65_and_older) %>%
+  st_transform(projection)
+
+# Load in Santa Clara County geometry as a "backdrop"
+scc <- counties("CA") %>% 
+  filter(NAME == "Santa Clara") %>% 
+  transmute(value = 0) %>% 
+  st_rasterize() %>% 
+  st_warp(
+    crs = projection,
+    cellsize = 500
+  )
+
+# Convert each geometry to a raster
+start_time = Sys.time()
+test_raster3 = 1:nrow(stacked_test) %>% 
+  map(function(i){
+    # print(i)
+    stacked_test[i,] %>% 
+      st_rasterize() %>% 
+      st_warp(scc) %>%
+      mutate(
+        value = ifelse(
+          is.na(value),
+          0,
+          value
+        )
+      )
+  })
+end_time = Sys.time()
+print("Generating dataset:")
+print(end_time - start_time) # About 3 mins
+
+# Compile sums of intersections of rasters
+final = test_raster3 %>% reduce(`+`)
+
+saveRDS(final, "final.rds")
+```
+
+```{r rasters - stars data plotting, eval=F, include=F}
+# Reload data if necessary
+final = readRDS("final.rds")
+
+start_time = Sys.time()
+#mapview(final) # Uncomment if running locally
+# Uncomment if running on R Markdown
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addStarsImage(final)
+end_time = Sys.time()
+print(end_time - start_time) # About 1 sec
+
+```
+
+```{r st_intersection NOT WORKING, eval=F, include=F}
+
+# Get intersections between all geometries
+# Note that current version of sf (0.9-7) has a bug in
+# st_intersection. Installation of developer version (0.9-8)
+# was needed for this to work
+# PROBLEM: Not all intersections are created for some reason
+intersection <- st_intersection(stacked_geometries %>%
+                                  st_buffer(0)) %>%
+  st_make_valid() %>%
+  st_set_geometry("walking_dist") %>%
+  filter(st_is(walking_dist, c("POLYGON", "MULTIPOLYGON"))) %>%
+  st_cast("MULTIPOLYGON")
+
+# Get sum of populations in intersections
+intersection_new <- 
+  1:nrow(intersection) %>% 
+  map_dfr(function(x){
+    
+    intersection %>% 
+      pull(origins) %>% 
+      .[x] %>% 
+      unlist() %>% 
+      stacked_geometries[.,] %>% 
+      st_drop_geometry() %>% 
+      dplyr::select(-LIMITED_ADDRESS,
+             -walking_time) %>% 
+      summarize_all(sum) %>% 
+      mutate(
+        origins = intersection$origins[x],
+        walking_dist = intersection$walking_dist[x]
+      )
+    
+  }) %>% 
+  st_as_sf()
+```
+
+```{r plot intersections, eval=F, include=F}
+
+intersection_pal = colorNumeric(
+  palette = "Greens",
+  domain = intersection_new$working_pop_65_and_older
+)
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    data = intersection_new,
+    color = ~intersection_pal(working_pop_65_and_older),
+    weight = 0.5,
+    opacity = 0.5,
+    fillOpacity = 0.6,
+    highlightOptions = highlightOptions(
+      color = "black",
+      weight = 2
+    ),
+    label = ~working_pop_65_and_older
+  ) %>%
+  addLegend(
+    data = intersection_new,
+    pal = intersection_pal,
+    values = ~working_pop_65_and_older,
+    title = "Accessibility",
+    opacity = 0.5,
+    layerId = "legend",
+    position = "bottomright"
+  )
+
+```
