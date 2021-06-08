@@ -1,0 +1,627 @@
+---
+title: "North Fair Oaks Cooling Centers"
+author: "Tiffany Zhu"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(sf)
+library(mapview)
+library(mapboxapi)
+library(leaflet)
+library(leafem)
+library(tigris)
+library(raster)
+library(fasterize)
+library(stars)
+library(readxl)
+library(censusapi)
+library(htmlwidgets)
+options(tigris_use_cache = TRUE)
+setwd("/Users/tiffanyzhu/Documents/GitHub/climate/Tiffany/siting_by_addresses/North Fair Oaks")
+
+Sys.setenv(CENSUS_KEY="5ace7165d1f551af1a6a8876ee3986faa544ea83")
+```
+
+```{r load data}
+
+# Get NFO CBGs
+smc_cbgs <- block_groups("CA", "San Mateo", cb = T, progress_bar = F)
+nfo_boundary <- places("CA", cb = T, progress_bar = F) %>% 
+  filter(NAME == "North Fair Oaks")
+nfo_coords <- nfo_boundary %>%
+  st_centroid() %>%
+  st_coordinates()
+nfo_cbgs <- smc_cbgs[nfo_boundary, ]
+
+# Get ACS metadata
+# acs_vars_2019_5yr <-
+#   listCensusMetadata(
+#     name = "2019/acs/acs5",
+#     type = "variables"
+#   )
+# saveRDS(acs_vars_2019_5yr, "acs_vars_2019_5yr.rds")
+acs_vars_2019_5yr = readRDS("acs_vars_2019_5yr.rds")
+```
+
+```{r}
+# Get ACS data on elderly population
+
+nfo_sexbyage <-
+  getCensus(
+    name = "acs/acs5",
+    vintage = 2019,
+    region = "block group:*", 
+    regionin = "state:06+county:081",
+    vars = "group(B01001)"
+  ) %>%
+  mutate(
+    cbg =
+      paste0(state,county,tract,block_group)
+  ) %>% 
+  dplyr::select(!c(GEO_ID,state,county,tract,block_group,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2019_5yr %>% 
+      dplyr::select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  dplyr::select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"sex","age"),
+    sep = "!!"
+  ) %>% 
+  filter(cbg %in% nfo_cbgs$GEOID,
+         !is.na(age)) %>% 
+  mutate(
+    elderly = 
+      ifelse(
+        age %in% c(
+          "65 and 66 years",
+          "67 to 69 years",
+          "70 to 74 years",
+          "75 to 79 years",
+          "80 to 84 years",
+          "85 years and over"
+        ),
+        estimate,
+        NA
+      )
+  ) %>% 
+  group_by(cbg) %>% 
+  summarize(
+    elderly = sum(elderly, na.rm = T),
+    total_pop = sum(estimate, na.rm = T)
+  ) %>% 
+  mutate(
+    percent_elderly = elderly/total_pop
+  ) %>% 
+  filter(!is.na(percent_elderly))
+  
+```
+
+
+```{r}
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs"
+pop19 <- read_csv("/Volumes/GoogleDrive/Shared drives/SFBI/Data Library/FCC/us2019.csv")
+
+#smc_blocks <- blocks("CA","081")
+#saveRDS(smc_blocks, "smc_blocks.rds")
+smc_blocks <- readRDS("smc_blocks.rds")
+nfo_blocks <- smc_blocks[nfo_boundary, ]
+```
+
+```{r}
+smc <- counties("CA") %>% 
+  filter(NAME == "San Mateo") %>% 
+  transmute(value = 0) %>% 
+  st_rasterize() %>% 
+  st_warp(
+    crs = projection,
+    cellsize = 250
+  )
+
+nfo_pop <- nfo_blocks %>% 
+  dplyr::select(GEOID10) %>% 
+  left_join(
+    pop19 %>% 
+      dplyr::select(GEOID10 = block_fips, pop = pop2019), 
+    by = "GEOID10"
+  ) %>% 
+ st_transform(projection) %>%
+  mutate(
+    area = st_area(.) %>% as.numeric(),
+    pop_density = pop/area
+  )
+saveRDS(nfo_pop, "nfo_pop.rds")
+
+nfo_pop = readRDS("nfo_pop.rds")
+nfo_pop_cbg <- nfo_pop %>%
+  mutate(cbg = substr(GEOID10, 1, 12)) %>%
+  left_join(nfo_sexbyage,
+            by = "cbg") %>%
+  mutate(elderly_by_block = pop * percent_elderly) %>%
+  st_transform(projection)
+saveRDS(nfo_pop_cbg, "nfo_pop_cbg.rds")
+
+mapview(nfo_pop_cbg, zcol = "elderly_by_block")
+mapview(nfo_pop_cbg, zcol = "pop_density")
+```
+
+We are now going to assume that all elderly are centered at the very middle of each block.
+
+```{r}
+nfo_pop_cbg = readRDS("nfo_pop_cbg.rds")
+
+nfo_pop_centroid <- nfo_pop_cbg %>% 
+  dplyr::select(value = elderly_by_block) %>% 
+  st_centroid() %>%
+  st_transform(projection)
+```
+
+# Using approximated isochrones
+
+Assuming all elderly can walk 0.25 miles from center of each block:
+
+```{r generate quasi-isochrones}
+
+nfo_raster <- smc %>% 
+  as("Raster")
+
+for(i in 1:nrow(nfo_pop_centroid)){
+  # for(i in 1:100){
+  if(i%%100==0) print(i)
+  index <- cellFromXY(nfo_raster, nfo_pop_centroid[i,] %>% st_coordinates())
+  index <- c(index,adjacent(nfo_raster, index, directions = 8, pairs = FALSE))
+  index <- c(index,adjacent(nfo_raster, index, directions = 8, pairs = FALSE))
+  index <- c(index,adjacent(nfo_raster, index, directions = 4, pairs = FALSE))
+  index <- c(index,adjacent(nfo_raster, index, directions = 4, pairs = FALSE))
+  index <- c(index,adjacent(nfo_raster, index, directions = 4, pairs = FALSE))
+  nfo_raster[index] <- nfo_raster[index] + nfo_pop_centroid[i,]$value
+}
+saveRDS(nfo_raster, "nfo_raster.rds")
+
+nfo_raster <- readRDS("nfo_raster.rds")
+nfo_final <- nfo_raster
+nfo_final[which(values(nfo_final) < 100)] <- NA
+saveRDS(nfo_final, "nfo_final.rds")
+```
+
+```{r plot quasi-isochrone raster}
+
+nfo_final <- readRDS("nfo_final.rds")
+
+pal_qua <- colorNumeric(
+  palette = "Blues",
+  domain = values(nfo_final),
+  na.color = "transparent"
+)
+nfo_map_quasi = leaflet() %>% 
+  # addProviderTiles(providers$CartoDB.Positron) %>% 
+  addTiles(urlTemplate = "http://mt0.google.com/vt/lyrs=m&hl=en&x={x}&y={y}&z={z}&s=Ga", attribution = 'Google') %>%
+  addRasterImage(
+    nfo_final,
+    colors = pal_qua,
+    opacity = 0.4
+  ) %>% 
+  addLegend(
+    pal = pal_qua,
+    values = values(nfo_final),
+    title = "Access"
+  ) %>%
+  setView(
+    lng = nfo_coords[,1],
+    lat = nfo_coords[,2],
+    zoom = 14
+  )
+nfo_map_quasi
+```
+
+# Demo quasi-isochrones
+
+```{r}
+nfo_raster_demo <- smc %>% 
+  as("Raster")
+
+i = 1
+
+  index <- cellFromXY(nfo_raster_demo, nfo_pop_centroid[i,] %>% st_coordinates())
+  index <- c(index,adjacent(nfo_raster_demo, index, directions = 8, pairs = FALSE))
+  index <- c(index,adjacent(nfo_raster_demo, index, directions = 8, pairs = FALSE))
+  index <- c(index,adjacent(nfo_raster_demo, index, directions = 4, pairs = FALSE))
+  index <- c(index,adjacent(nfo_raster_demo, index, directions = 4, pairs = FALSE))
+  index <- c(index,adjacent(nfo_raster_demo, index, directions = 4, pairs = FALSE))
+  nfo_raster_demo[index] <- nfo_raster_demo[index] + nfo_pop_centroid[i,]$value
+
+pal_qua_demo <- colorNumeric(
+  palette = "Blues",
+  domain = values(nfo_raster_demo),
+  na.color = "transparent"
+)
+nfo_quasi_demo = leaflet() %>% 
+  # addProviderTiles(providers$CartoDB.Positron) %>% 
+  addTiles(urlTemplate = "http://mt0.google.com/vt/lyrs=m&hl=en&x={x}&y={y}&z={z}&s=Ga", attribution = 'Google') %>%
+  addRasterImage(
+    nfo_raster_demo,
+    colors = pal_qua_demo,
+    opacity = 0.4
+  ) %>% 
+  addLegend(
+    pal = pal_qua_demo,
+    values = values(nfo_raster_demo),
+    title = "Access"
+  ) %>%
+  setView(
+    lng = nfo_coords[,1],
+    lat = nfo_coords[,2],
+    zoom = 14
+  )
+nfo_quasi_demo
+```
+
+
+# Using Mapbox isochrones
+
+```{r get isochrones and donuts, eval=F}
+# get mapbox isochrones for rasters
+
+num_rows <- nrow(nfo_pop_centroid)
+
+walk5_nfo <- NULL
+for (i in 1:num_rows) {
+  # Break down isochrone creation process
+  isochrone <- mb_isochrone(
+    nfo_pop_centroid[i,],
+    profile = "walking",
+    time = 5
+    )
+  temp_row = isochrone %>%
+    rename(walk5 = geometry) %>%
+    cbind(nfo_pop_centroid[i,] %>% st_transform(4326)) %>%
+    rename(block_center = geometry)
+  walk5_nfo = rbind(walk5_nfo, temp_row)
+  
+  # Sleep so as not to crash Mapbox
+  # Sys.sleep(0.5)
+  
+  # Periodically save file
+  if (i %% 10 == 0 | i == num_rows) {
+    saveRDS(walk5_nfo, "walk5_nfo.rds")
+  }
+  
+  # Track progress
+  if (i %% 50 == 0) {
+    print(i)
+  }
+}
+
+walk10_nfo <- NULL
+for (i in 1:num_rows) {
+  # Break down isochrone creation process
+  isochrone <- mb_isochrone(
+    nfo_pop_centroid[i,],
+    profile = "walking",
+    time = 10
+    )
+  temp_row = isochrone %>%
+    rename(walk10 = geometry) %>%
+    cbind(nfo_pop_centroid[i,] %>% st_transform(4326)) %>%
+    rename(block_center = geometry)
+  walk10_nfo = rbind(walk10_nfo, temp_row)
+  
+  # Sleep so as not to crash Mapbox
+  # Sys.sleep(0.5)
+  
+  # Periodically save file
+  if (i %% 10 == 0 | i == num_rows) {
+    saveRDS(walk10_nfo, "walk10_nfo.rds")
+  }
+  
+  # Track progress
+  if (i %% 50 == 0) {
+    print(i)
+  }
+}
+
+# Donut generation
+walk5to10_diff = 1:nrow(walk10_nfo) %>%
+  map(function(i){
+    st_difference(walk10_nfo[i,], walk5_nfo[i,]) %>%
+    st_cast("MULTIPOLYGON")
+  })
+donuts5to10_nfo = do.call(rbind, walk5to10_diff)
+
+```
+
+```{r create stacked geoms and raster, eval=F}
+# Bind donuts to 5-min isochrones
+
+nfo_blocks_donuts <- nfo_pop_centroid %>%
+  rename(block_center = geometry) %>%
+  cbind(walk5_nfo$walk5) %>%
+  rename(walk5 = geometry) %>%
+  cbind(donuts5to10_nfo$walk10) %>%
+  rename(walk5to10 = geometry) %>%
+  mutate(
+    value_5to10 = value / 2
+  ) %>%
+  st_set_geometry(NULL) %>%
+  st_as_sf() %>%
+  pivot_longer(cols = starts_with("walk"),
+               names_to = "walking_time",
+               values_to = "walking_dist",
+               names_prefix = "walk") %>%
+  mutate(
+    accessibility =
+      ifelse(
+        walking_time == 5,
+        value,
+        value_5to10
+      )
+  ) %>%
+  st_as_sf() %>%
+  st_cast("MULTIPOLYGON") %>%
+  st_transform(projection)
+saveRDS(nfo_blocks_donuts, "nfo_blocks_donuts.rds")
+nfo_blocks_donuts = readRDS("nfo_blocks_donuts.rds")
+
+isochrone_raster <- fasterize(nfo_blocks_donuts, 
+                          raster(nfo_blocks_donuts, res = 200), 
+                          field = "accessibility",
+                          fun = "sum")
+isochrone_raster[which(values(isochrone_raster) < 100)] <- NA
+saveRDS(isochrone_raster, "isochrone_raster.rds")
+
+```
+
+```{r plot isochrone raster}
+
+isochrone_raster = readRDS("isochrone_raster.rds")
+
+pal_iso <- colorNumeric(
+  palette = "Blues",
+  domain = values(isochrone_raster),
+  na.color = "transparent"
+)
+
+nfo_map = leaflet() %>% 
+  addProviderTiles(providers$CartoDB.Positron,
+                   group = "Minimal Basemap") %>%
+  addTiles(urlTemplate = "http://mt0.google.com/vt/lyrs=m&hl=en&x={x}&y={y}&z={z}&s=Ga",
+           attribution = 'Google',
+           group = "Google Maps") %>%
+  addRasterImage(
+    isochrone_raster,
+    colors = pal_iso,
+    opacity = 0.4,
+    group = "NFO Accessibility"
+  ) %>% 
+  addLegend(
+    pal = pal_iso,
+    values = values(isochrone_raster),
+    title = "Estimated Population<br>Able to Access Area",
+    group = "NFO Accessibility"
+  ) %>%
+  setView(
+    lng = nfo_coords[,1],
+    lat = nfo_coords[,2],
+    zoom = 15
+  ) %>%
+  addLayersControl(
+    baseGroups = c(
+      "Minimal Basemap",
+      "Google Maps"
+    ),
+    overlayGroups = c(
+      "NFO Accessibility"
+    ),
+    options = layersControlOptions(collapsed = TRUE)
+  ) %>%
+  showGroup("Google Maps") %>% 
+  showGroup("NFO Accessibility")
+saveWidget(nfo_map, file = "nfo_map.html")
+nfo_map
+```
+
+```{r}
+# Create composite map
+
+pal_blocks = colorNumeric(
+  palette = "Purples",
+  domain = nfo_pop_cbg$elderly_by_block
+)
+
+nfo_map_demo = leaflet() %>% 
+  addProviderTiles(
+    providers$CartoDB.Positron,
+    group = "Minimal Basemap") %>%
+  addTiles(
+    urlTemplate = "http://mt0.google.com/vt/lyrs=m&hl=en&x={x}&y={y}&z={z}&s=Ga",
+    attribution = 'Google',
+    group = "Google Maps") %>%
+  addPolygons(
+    data = nfo_pop_cbg %>%
+      st_transform(4326),
+    group = "All Blocks"
+  ) %>%
+  addPolygons(
+    data = nfo_pop_cbg %>%
+      st_transform(4326),
+    fillColor = ~pal_blocks(elderly_by_block),
+    color = "white",
+    opacity = 0.8,
+    fillOpacity = 0.5,
+    weight = 1,
+    label = ~paste0(
+      round(elderly_by_block), 
+      " over age 65"
+    ),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      opacity = 1
+    ),
+    group = "Blocks with Elderly Population"
+  ) %>% 
+  addLegend(
+    data = nfo_pop_cbg,
+    pal = pal_blocks,
+    values = ~elderly_by_block,
+    title = "Approximate Elderly per Block",
+    group = "Blocks with Elderly Population"
+  ) %>%
+  # addRasterImage(
+  #   nfo_final,
+  #   colors = pal_qua,
+  #   opacity = 0.4,
+  #   group = "Circular Walking Distance"
+  # ) %>% 
+  # addLegend(
+  #   pal = pal_qua,
+  #   values = values(nfo_final),
+  #   title = "Access",
+  #   group = "Circular Walking Distance"
+  # ) %>%
+  addRasterImage(
+    isochrone_raster,
+    colors = pal_iso,
+    opacity = 0.4,
+    group = "Accessibility in NFO"
+  ) %>% 
+  
+  addLegend(
+    pal = pal_iso,
+    values = values(isochrone_raster),
+    title = "Estimated Population<br>Able to Access Area",
+    group = "Accessibility in NFO"
+  ) %>%
+  addPolygons(
+    data = nfo_pop_cbg[1,] %>% 
+      st_transform(4326),
+    group = "Sample Block"
+  ) %>% 
+  addMarkers(
+    data = nfo_pop_centroid[1,] %>%
+      st_transform(4326),
+    group = "Sample Marker"
+  ) %>% 
+  addPolygons(
+    data = nfo_blocks_donuts[1,] %>% 
+      st_transform(4326),
+    group = "Sample Isochrone"
+  ) %>% 
+  setView(
+    lng = nfo_coords[,1],
+    lat = nfo_coords[,2],
+    zoom = 15
+  ) %>%
+  addLayersControl(
+    baseGroups = c(
+      "Minimal Basemap",
+      "Google Maps"
+    ),
+    overlayGroups = c(
+      "Accessibility in NFO",
+      "All Blocks",
+      "Blocks with Elderly Population",
+      # "Circular Walking Distance",
+      "Sample Block",
+      "Sample Marker",
+      "Sample Isochrone"
+    ),
+    options = layersControlOptions(collapsed = TRUE)
+  ) %>%
+  showGroup("Google Maps") %>%
+  hideGroup("Accessibility in NFO") %>% 
+  hideGroup("All Blocks") %>% 
+  hideGroup("Blocks with Elderly Population") %>% 
+  # hideGroup("Circular Walking Distance") %>% 
+  hideGroup("Sample Block") %>% 
+  hideGroup("Sample Marker") %>% 
+  hideGroup("Sample Isochrone")
+saveWidget(nfo_map_demo, file = "nfo_map_demo.html")
+nfo_map_demo
+```
+
+
+
+
+
+
+
+```{r}
+# could filter to nonresidential parcels in hotspot areas
+```
+
+
+
+
+```{r ignore this}
+# Get data on household units
+
+smc_assessor_full = readRDS("/Volumes/GoogleDrive/Shared drives/SFBI-Restricted/SMC Assessor/smc_assessor_full.rds")
+
+nfo_bat_parcels = readRDS("/Users/tiffanyzhu/Documents/GitHub/trees/NFO/nfo_bat_parcels.rds")
+nfo_parcels = readRDS("/Users/tiffanyzhu/Documents/GitHub/climate/Tiffany/siting_by_addresses/nfo_parcels.rds")
+nfo_parcels_assessor = readRDS("/Volumes/GoogleDrive/Shared drives/SFBI-Restricted/W21 218Y Tree Team/NFO_data/nfo_parcels_assessor.rds") # Should be right one
+nfo_parcels_owneroccupied = readRDS("nfo_parcels_owneroccupied.rds")
+
+
+nfo_parcels_filt = nfo_parcels_assessor %>%
+  filter(PUC %in% c(1,2,3,4,91,89,91,92,93,94,95,96,97,98)) %>%
+  rename(Units = `NO OF UNITS`) %>%
+  mutate(
+    Units = ifelse(
+      !is.na(Units),
+      Units,
+      1
+    )
+  )
+
+# number of units
+sum(nfo_parcels_filt$Units) # 4870
+# number of households
+sum(pop_tenure_elderly_geoms$estimate) # 4183
+
+hh_units_ratio = sum(pop_tenure_elderly_geoms$estimate) / sum(nfo_parcels_filt$Units)
+
+# Analyze ACS data
+
+total_hh_by_tract_tenure = pop_tenure_elderly %>%
+                           group_by(tract, tenure) %>%
+                           summarize(
+                             total_households = sum(estimate, na.rm = TRUE)
+                           )
+elderly_hh_by_tract_tenure = pop_tenure_elderly %>%
+                             group_by(tract, tenure, householder_age) %>%
+                             summarize(
+                               total_households = sum(estimate, na.rm = TRUE)
+                             )
+elderly_hh_by_tract_tenure
+
+test = left_join(nfo_parcels_filt,
+                 nfo_tracts %>% st_set_geometry(NULL),
+                 by = c('tract' = 'GEOID'))
+test
+
+# Split out renter vs. owner data
+
+# Experiment with tract 06081611400
+test_tract = nfo_tracts %>%
+  filter(GEOID == '06081611400')
+
+nfo_renters = nfo_parcels_owneroccupied %>%
+  filter(`EXEMPTION CODE` == 'HODP')
+nfo_owners = nfo_parcels_owneroccupied %>%
+  filter(`EXEMPTION CODE` == 'HO')
+
+```
+
+

@@ -20,7 +20,7 @@ library(raster)
 library(fasterize)
 library(stars)
 library(googlesheets4)
-setwd("/Users/tiffanyzhu/Documents/GitHub/climate/Tiffany/siting_by_addresses")
+setwd("/Users/tiffanyzhu/Documents/GitHub/climate/Tiffany/siting_by_addresses/Santa Clara County/")
 ```
 
 # Data Loading
