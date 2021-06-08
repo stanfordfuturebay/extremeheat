@@ -1,0 +1,460 @@
+---
+title: "Heat/Health Analysis"
+author: "Awoe"
+date: "5/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(sf)
+library(tigris)
+library(leaflet)
+library(sp)
+library(rgeos)
+library(dplyr)
+library(mapview) #mapping
+library(ggplot2)
+library(fixest) #stats
+library(lfe)
+library(censusapi)
+```
+
+Step 1: Initializing -- grabbing heat and health tidy data
+```{r Pulling Data}
+HealthData_CA <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/CA_year_ZCTAS.rds")
+HeatData_CA <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/lst_bay_area_ZCTAS.rds")
+
+HealthData_Month <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/CA_month_ZCTAS.rds")
+HeatData_Month <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/lst_ca_months.rds")
+
+HealthData_Month <- HealthData_Month %>% select(!population)
+
+
+```
+
+Step 2: Goal is to get data looking like this: 
+
+Year | ZIPCODE | n | Temp
+__________________________
+2004 | 94305 | 9 | 85.4
+2004 | 94306 | 12 | 83.4
+
+MONTHLY DATA
+```{r Get data in same format}
+#LST data needs to be long; gonna work in a temporary file until we know this works
+
+TempHeat <- HeatData_Month %>% 
+  select(!c(LST,geometry))
+
+names(TempHeat) <- sub("lst_ca_","",names(TempHeat))
+names(TempHeat) <- sub(".LST","",names(TempHeat))
+
+TempHeat <- TempHeat %>% 
+  #pivot_longer(cols = c(starts_with("lst_bay")),  names_to = "temp_year", values_to = "temp")
+  pivot_longer(!c(ZIPCODE_5,geometry), names_to = "temp_year", values_to = "temp")
+
+yr_month = str_split_fixed(TempHeat$temp_year, "_", 2) %>% 
+           unlist() %>% 
+           as_data_frame() %>% 
+           rename(year = "V1", month = "V2")
+    
+TempHeat <- TempHeat %>% 
+          cbind(yr_month) %>%  
+          select(!temp_year) 
+
+
+```
+
+YEARLY step 2:
+```{r S2 Yearly}
+# TempHeat_B <- HeatData_CA %>% 
+#   select(!c(LST,geometry))
+# 
+# names(TempHeat) <- sub("lst_bay_area_","",names(TempHeat))
+# names(TempHeat) <- sub(".LST","",names(TempHeat))
+# 
+# TempHeat <- TempHeat %>% 
+#   #pivot_longer(cols = c(starts_with("lst_bay")),  names_to = "temp_year", values_to = "temp")
+#   pivot_longer(!c(ZIPCODE_5,geometry), names_to = "temp_year", values_to = "temp")
+
+```
+
+
+Step 3: combine heat and health data frames 
+```{r left_joining}
+#need to remove months before 2015 in the health data
+HealthData_Month_2015 <-  HealthData_Month %>% filter(year > 2014 & month == "05"| month == "06" | month == "07"| month == "08") 
+
+#this needs to be modified so that year/month are pulled appropriately from TempHeat
+Heat_Health <- left_join(HealthData_Month_2015 %>% ungroup() %>% select(-geometry),TempHeat,by = c("ZIPCODE_5","year"="year","month"="month"))
+
+Heat_Health_Complete <- na.omit(Heat_Health) #our combined data set here!
+```
+
+Step 3: YEARLY
+```{r S3 Yearly}
+
+Heat_Health_Bay <- left_join(HealthData_Bay %>% ungroup() %>% select(-geometry), TempHeat, by = c("ZIPCODE_5","year"="temp_year"))
+Heat_Health <- left_join(HealthData_CA %>% ungroup() %>% select(-geometry), TempHeat, by = c("ZIPCODE_5","year"="temp_year"))
+Heat_Health_Complete_yr <- na.omit(Heat_Health)
+
+HH_Combined <- Heat_Health %>%
+  select(-population) %>%
+  na.omit()
+
+HH_Combined_Bay <- Heat_Health_Bay %>% 
+  select(-norm_pop) %>% 
+  na.omit()
+```
+
+Step 4: we need to include population data to normalize our hospitalizations:
+
+4a: grab census population
+```{r pop_setup}
+ 
+zipcodes<- zctas(cb = TRUE, starts_with = c("94","95","90", "91","93","92","96"))
+#this pulls total population data (ACS 5Yr; 2014-2020) in CA
+Sys.setenv(CENSUSKEY = "9f6ff58924d0cb827a42a2010c23ed9a5deeee7e") #insert your own key here
+
+CA_pop_ages <- 
+  getCensus(
+    name = "acs/acs5",
+    vintage = 2019, 
+    region = "zip code tabulation area:*",
+    regionin = "state:06",
+    vars = "group(B01003)",
+    key = "9f6ff58924d0cb827a42a2010c23ed9a5deeee7e"#your personal census key
+  ) %>% 
+select(!c(state,NAME) & !ends_with(c("1EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "pop_count"
+  )
+
+
+```
+
+4b: add population data to Heat/Health complete data frame
+```{r pop_add}
+#add population code here to Heat_Health_Complete
+data_CA_unique <- Heat_Health_Complete %>% 
+  ungroup() %>% 
+  select(c("ZIPCODE_5", "geometry")) %>% 
+  mutate(population = NA) %>% #creatibng two empty columns for the  population
+  distinct(ZIPCODE_5,.keep_all = TRUE) #grabbing just the unique/distinct ZCTAs
+
+#derek check here
+for (i in 1:nrow(data_CA_unique)) {
+  print(paste0("starting row", i))
+  #grab the first z1
+  zcta <- str_split(data_CA_unique$ZIPCODE_5[i], "_") %>% unlist() #split the zip codes
+
+  zcta_pop <- CA_pop_ages %>% filter(zip_code_tabulation_area %in% zcta) #grabbing zipcodes from 
+  #we're running another loop to populate our population column 
+  if (nrow(zcta_pop) > 0) {
+    data_CA_unique$population[i] <- sum(zcta_pop$pop_count) #assign population to pop column
+  }
+}
+```
+
+4c: saving population data
+```{r saving Population data}
+setwd("G:/Shared drives/SFBI-Restricted/PHS")
+saveRDS(data_CA_unique, "Population_15-20_CA_ZCTAs")
+
+#MONTHLY leftjoin~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ data_CA_month_geom_pop <- left_join(Heat_Health_Complete %>% ungroup(), data_CA_unique, by = c("ZIPCODE_5","geometry"))#combining unique geometries with the entire
+```
+
+```{r saving pop monthly data}
+#
+setwd("G:/Shared drives/SFBI-Restricted/PHS")
+#saveRDS(Heat_Health_Complete,"Heat_Health_Combined_CA.rds")
+#saveRDS(Heat_Health_Complete_yr,"Heat_Health_Pop_Yearly.rds")
+
+#without population data: 
+saveRDS(data_CA_month_geom_pop, "HH_Combined_15-20_wPop.rds")
+
+```
+
+4d: creating normalized population column and combining with full data frame
+```{r}
+
+data_CA_month_pop <- data_CA_month_geom_pop %>% ungroup() %>%
+   select(-c(geometry)) %>%
+   group_by(year, month, ZIPCODE_5, temp) %>% #maybe remove this if it messes things up
+   summarise(
+    n = sum(n),
+    norm_pop = n/population
+    )
+#putting year, month into a column together
+data_CA_year_pop_old <- data_CA_month_geom_pop %>% 
+  select(-c(geometry)) %>%
+  group_by(year, ZIPCODE_5) %>%
+  summarise(
+    n = sum(n),
+    norm_pop = n/population,
+    temp = mean(temp)
+  ) %>% unique()
+
+saveRDS(data_CA_year_pop_old, "HH_Combined_15-20_wNormPop.rds")
+
+data_CA_year_pop_old <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/HH_Combined_15-20_wNormPop.rds")
+
+data_CA_year_pop <- data_CA_year_pop_old %>% filter(temp > 105)
+```
+```{r}
+# data_CA_month_geom_pop %>% 
+#   st_as_sf() %>% #make the data a sf object
+#   st_set_crs(4269) %>% #assign it a coordinate reference system (crs)
+#   .[CA_counties %>% st_transform(projection) %>% st_buffer(-100) %>% st_transform(4269), ]
+```
+
+
+4e: Saving data frame (with normalized population)
+```{r saving combined data frame}
+#set where you want to save it w/ setwd()
+
+setwd("G:/Shared drives/SFBI-Restricted/PHS")
+#saveRDS(Heat_Health_Complete,"Heat_Health_Combined_CA.rds")
+#saveRDS(Heat_Health_Complete_yr,"Heat_Health_Pop_Yearly.rds")
+
+#without population data: 
+saveRDS(HH_Combined, "HH_Combined_noPOP.rds")
+
+
+```
+
+
+Step 5: Initial data visualization -- creating scatter plots with lm regression
+```{r basic visualization}
+#read in saved data
+Heat_Health_Complete <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/HH_Combined_15-20_wPop.rds")
+
+#Heat_Health_Complete <- Heat_Health_Complete_yr
+
+#scatter plot
+ggplot(data=Heat_Health_Complete, aes(x=temp,y=n)) + 
+  geom_point() + geom_smooth(method = "lm")
+
+
+#line plot with heat over time and hospitalizations over time
+HHC_Year <- Heat_Health_Complete %>% 
+  group_by(year) %>% 
+  summarise(
+    hospitalizations = mean(n),
+    temperature = mean(temp)
+  )
+
+ggplot(data = HHC_Year, aes(x=year,y=hospitalizations)) +
+  geom_point()
+
+ggplot(data = HHC_Year, aes(x=year,y=temperature)) +
+  geom_point()
+
+ggplot(data = HHC_Year, aes(x=hospitalizations,y=temperature)) +
+  geom_point() + geom_smooth(method = "lm") # initial visualization w correlation 
+
+#normalized population
+
+# HHC_Year_Norm <- Heat_Health_Complete %>% 
+#   group_by(year) %>% 
+#   summarise(
+#     hospitalizations = mean(norm_pop),
+#     temperature = mean(temp)
+#   )
+# 
+# ggplot(data = HHC_Year_Norm, aes(x=year,y=hospitalizations)) +
+#   geom_point()
+# 
+# ggplot(data = HHC_Year_Norm, aes(x=year,y=temperature)) +
+#   geom_point()
+# 
+# ggplot(data = HHC_Year_Norm, aes(x=hospitalizations,y=temperature)) +
+#   geom_point() + geom_smooth(method = "lm") # initial visualization w correlation 
+
+# visualizing just for the last 5 yrs
+HHC_Year_post2015 <- HHC_Year %>% 
+  subset(year %in% c(2015:2020))
+
+ggplot(subset(HHC_Year, year %in% c(2015:2020)), aes(x=hospitalizations,y=temperature)) +
+  geom_point() + geom_smooth(method = "lm") # initial visualization w correlation 
+
+ggplot(data_CA_year_pop, aes(x=temp,y=n)) +
+  geom_point() + geom_smooth(method = "lm") # above 105
+
+ggplot(data_CA_year_pop_old, aes(x=temp,y=n)) +
+  geom_point() + geom_smooth(method = "lm") # median temp
+
+```
+
+Step 5: Regression analysis
+
+Goal: run panel regression with fixed effects
+-- we're running this to consider fixed effects (externalities) -- aka we're controlling for unobserved variables. Basically we demean our variables in this case this will be temperature and hospitalizations over our time pd. then we subtract that 
+
+First we'll show what this analysis looks like without fixed effects
+
+```{r linear regression}
+
+mod1 <- lm(norm_pop ~ temp, data=data_CA_year_pop)
+x = 60:100
+yy <- predict(mod1,data.frame(temp=x),interval = "predict", level=0.95)  #this is now a matrix with three columns, giving the point estimate and the upper and lower bounds of the 95% confidence interval
+plot(x,yy[,1],type="l",las=1,xlab="temperature",ylab="hospitalizations")
+lines(x,yy[,2],lty=2)  #lower bound
+lines(x,yy[,3],lty=2) # upper bound
+
+#middle line is estimate; top and bottom lines are upper and lower bounds. 
+ggplot() +
+  geom_line(aes(x=x, y=yy[,1])) +
+  geom_line(aes(x=x, y=yy[,2])) +
+  geom_line(aes(x=x, y=yy[,3]))
+
+#note that the CI include zero so our result is not significant -- (we are failing to reject our null hypothesis that heat is the only cause for increased hospitalizations)
+
+coef(mod1)
+```
+
+Now, we'll look at it after applying FE
+```{r regression analysis -- FE}
+# panel regression w fixed effects
+# we're using the fixest package bc it subtracts the mean for us (else we'd have to do it ourselves before running the regression)
+
+mod <- feols(norm_pop ~ temp | ZIPCODE_5 + year, data = data_CA_year_pop) #regressing environmental data on response (hospitalizations in this case)
+summary(mod) #interpretation: our estimate tells that for every 1 degree increase in temp, our estimate is the effect on hospitalizations. 
+
+# ##FE by hand~~~~~~~~~~~~
+# mod_test <-  felm(norm_pop ~ temp | ZIPCODE_5 + year, data = Heat_Health_Complete)
+# mean_norm <- mean(Heat_Health_Complete$norm_pop)
+# Heat_Health_Complete$n_demean
+
+cf <- summary(mod$coefficients)
+coef(mod) # we get that our coef = 1.06 meaning for every 1 deg increase in temp; we expect 1.06 hospitalizations; we'll look at Zipcode specific FE
+## this will help us look at variation within 
+
+#ZIPCODE specific time trends including year FE: (based on median temp >105)
+data_CA_year_pop$year <- as.numeric(data_CA_year_pop$year)
+mod_zip <- feols(n ~ temp | ZIPCODE_5 + ZIPCODE_5[year], data = data_CA_year_pop)
+mod_zip_norm <- feols(norm_pop ~ temp | ZIPCODE_5 + ZIPCODE_5[year], data = data_CA_year_pop)
+
+#median temp
+data_CA_year_pop_old$year <- as.numeric(data_CA_year_pop_old$year)
+mod_zip_med <- feols(n ~ temp | ZIPCODE_5 + ZIPCODE_5[year], data = data_CA_year_pop_old)
+mod_zip_norm_med <- feols(norm_pop ~ temp | ZIPCODE_5 + ZIPCODE_5[year], data = data_CA_year_pop_old)
+
+summary(mod_zip)
+coef(mod_zip)
+coef(mod_zip_norm)
+
+summary(mod_zip_med)
+coef(mod_zip_med)
+coef(mod_zip_norm_med)
+
+ggplot(data=data_CA_year_pop, aes(x=temp, y=norm_pop)) + geom_point() + geom_smooth(method=lm)
+ 
+```
+Additional regression exploration
+```{r}
+# quadratic relationship n = T+T^2
+summary(feols(n ~ poly(temp,2,raw = TRUE) | ZIPCODE_5 + year, data = data_CA_year_pop)) # quick approach
+
+Heat_Health_Complete$temp2 <- Heat_Health_Complete$temp^2 #manual
+summary(mod <- feols(n ~ temp + temp2 | ZIPCODE_5 + year, data = data_CA_year_pop))
+
+
+
+#plotting 
+range(Heat_Health_Complete$temp) 
+x = 60:100
+yy = x*mod_zip$coefficients[1]#generating the predicted values for y and (y=bx)
+#ggplot(data = Heat_Health_Complete, aes(x=x, y=yy)) + 
+  #geom_line()
+plot(x, yy, type = "l", las = 1, ylab = "hospitalizations", xlab = "temperature") #here, we are plotting the predicted values (hospitalizations) per temp. Interpretation: the effect of temperature on heat-related hospitalizations
+
+#plotting the quadratic model
+
+mod_quad <- feols(n ~ temp + temp2 | ZIPCODE_5 + year, data = Heat_Health_Complete)
+yy_quad <- x*mod_quad$coefficients[1] + x^2*mod_quad$coefficients[2]
+plot(x, yy_quad, type = "l", las = 1, ylab = "hospitalizations", xlab = "temperature")
+
+mean(Heat_Health_Complete$temp)
+#relationship is definitely more linear than quadratic. 
+
+#I think our plot is being centered at 0; consider centering at mean so x=82degF
+
+#correlation
+cor(Heat_Health_Complete$n,Heat_Health_Complete$temp)
+```
+
+Step 6: Including Uncertainty (not finished; returned to initial data wrangling bc getting insignificant results)
+```{r exploring uncertainty}
+
+# uncertainty 
+
+## gotta consider uncertainty so we'll use a bootstrapping method to determine confidence intervals
+
+#first visualizing what the confidence intervale looks like for our coefficents.
+coefplot(mod_zip)
+coefplot(mod_zip_norm)
+
+#PLOT COEFFICIENTS WITH CONFIDENCE INTERVALS HERE
+png("median_temp_CIs.png", width = 480, height = 480)
+coefplot(mod_zip_med)
+dev.off()
+
+png("median_temp_norm_CIs.png", width = 480, height = 480)
+coefplot(mod_zip_norm_med)
+dev.off()
+
+coefplot(mod)
+confint(mod_zip_med) #confidence interval does not include 0 so significant. 
+confint(mod_zip_norm_med)
+
+CIs <- confint(mod_zip) #includes 0 not significant
+
+ConLow <- yy - CIs[1,1]
+ConHigh <- yy + CIs[2,1]
+
+
+coef <- matrix(nrow=100,ncol=1)  #matrix to hold coefficients we're generating 
+ll = dim(Heat_Health_Complete)[1]  #the number of observations we have in the original dataset: 1452
+
+for (i in 1:100)  {
+  samp <- sample(1:ll,size=ll,replace=T)  #this draws a sample of length 1452 from the numbers 1:1452 
+  newdata = Heat_Health_Complete[samp,]
+      # to convince yourself this is the same size as old dataset: dim(dta), dim(newdata)
+  mod_test <- feols(n ~ temp | ZIPCODE_5 + ZIPCODE_5[year], data = newdata)  #estimate our regression y = b1*T 
+  coef[i,] <- coef(mod_test)  #extract the coefficient estimates of b1 and b2 and store them in the matrix we made above
+}
+# Okay so now our coef matrix has 100 bootstrapped estimates for our two coefficients.
+
+
+boots <- matrix(nrow=100,ncol=length(x))  #making a matrix to hold our estimates. nrow= number of bootstraps, ncol = number of X values we want to compute
+for (i in 1:100) {
+  yy <- x*coef[i,1]   # as before
+  boots[i,] <- yy  # save these to the boots matrix
+}
+
+CI <- apply(boots,2,function(x) quantile(x,probs=c(0.05,0.5,0.95)))
+
+
+
+#bootstrapped plot
+plot(x, yy, type = "l", las = 1, ylab = "hospitalizations", xlab = "temperature")
+polygon(c(x, rev(x)),c(CI[1,],rev(CI[3,])),col = "grey80",border = NA)
+lines(x, CI[2,])
+
+#janky not bootstrapped plot 
+plot(x, yy, type = "l", las = 1, ylab = "hospitalizations", xlab = "temperature")
+polygon(c(x, rev(x)),c(ConLow,rev(ConHigh)),col = "grey80",border = NA)
+lines(x, CI[2,])
+
+
+
+```
+
+

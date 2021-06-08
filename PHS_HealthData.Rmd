@@ -1,0 +1,178 @@
+---
+title: "PHS_Trends"
+author: "Awoe"
+date: "4/21/2021"
+output: html_document
+---
+
+Goal: Prepare optum raw health hospitalizations data to merge with temperature data.
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(sf)
+library(tigris)
+library(leaflet)
+library(sp)
+library(rgeos)
+library(dplyr)
+library(mapview)
+library(ggplot2)
+
+
+# install.packages("censusapi")
+library(censusapi)
+
+memory.limit(64000)
+```
+
+
+Step 1: Initializing -- Pulling Optum Data; we're going to focus on cleaning the monthly data set, but you can pull yearly or seasonly. 
+```{r pulling-data}
+data<- readRDS("G:/Shared drives/SFBI-Restricted/PHS/optum_summary_year.rds")
+#data_month <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/optum_summary_month.rds")
+#data_season <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/optum_summary_season.rds")
+```
+
+Step 2: Pulling Zipcode and Population Data
+```{r setting up for creating our sf later}
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs" 
+# bay_county_names <-
+#   c(
+#     "Alameda", #zip codes: 94501, 94502, 94606
+#     "Contra Costa", #start with 94
+#     "Marin", #start with 94
+#     "Napa", #start with 94
+#     "San Francisco", #start with 94
+#     "San Mateo", #starts with 94
+#     "Santa Clara", #start with 94 and 95
+#     "Solano", #start with 94 and 95
+#     "Sonoma" #start with 94 and 95
+#   )
+
+CA_counties <-
+  counties("CA", cb = T, progress_bar = F) 
+
+#grabbing the ZCTAS from tigris
+zipcodes<- zctas(cb = TRUE, starts_with = c("94","95","90", "91","93","92","96"))
+
+```
+
+Step 3: Three goals here: 
+a. our data set includes more than just california so here, we will filter zipcodes for just CA
+b. we're going to filter for just heat-related hospitalizations in via ICD codes in the DIAG column
+c. create shapefiles from the zipcodes so we can map them
+```{r filtering just for heat hospitalizations across CA | 3ab}
+### hiding code that filters for bay area. Just gonna plot entire california; assuming 
+### that all the counties are in CA. 
+
+#YEARLY DATA~~~~~~~~~~~~~~~~~~
+
+#filter the data within California's ZCTAs based on the first two characters/"digits" of the data's ZIPCODE_5 
+data_CA <- data %>%
+ filter(substr(ZIPCODE_5,1,2) %in% c("90","91","92","93","94","95","96"))  %>%  
+  filter(
+    substr(DIAG, 1, 3) %in% c(
+      "992",
+      "E87",
+      "T67"
+    ) | substr(DIAG, 1, 4) %in% c(
+      "2760",
+      "9944",
+      "9945",
+      "T732",
+      "T733"
+    )
+  )
+
+#MONTHLY DATA~~~~~~~~~~~~~~~~~~~~
+# data_CA <- data_month %>%
+#  filter(substr(ZIPCODE_5,1,2) %in% c("94","95","90", "91","93","92","96"))  %>%  
+#   filter(
+#     substr(DIAG, 1, 3) %in% c(
+#       "992",
+#       "E87",
+#       "T67"
+#     ) | substr(DIAG, 1, 4) %in% c(
+#       "2760",
+#       "9944",
+#       "9945",
+#       "T732",
+#       "T733"
+#     )
+#   )
+```
+
+Step 3c: 
+```{r assigning geometries to zipcodes | 3c}
+
+#data_CA has multiple observations for each unique 1470 ZCTAs making up our 5mill observations. So we'll look at the unique ones then fill in later with a left_join().
+data_CA_unique <- data_CA %>% 
+  ungroup() %>% 
+  #select(-c("year","DIAG","n")) %>% 
+  mutate(geometry = NA) %>% #creating an empty columns for the geometry
+  distinct(ZIPCODE_5,.keep_all = TRUE) #grabbing just the unique/distinct ZCTAs
+ 
+#loop that aggregates zipcodes to match the optum dataset
+for (i in 1:nrow(data_CA_unique)){
+  #grab the first z1
+  zcta <- str_split(data_CA_unique$ZIPCODE_5[i], "_") %>% unlist() #split the zip codes
+  zcta_geom <- zipcodes %>% filter(ZCTA5CE10 %in% zcta) #grabbing the geometry of the zctas from the bay area ZCTAs
+  zcta_pop <- CA_pop_ages %>% filter(zip_code_tabulation_area %in% zcta) #grabbing zipcodes from our census data to preserve vector length
+  if(nrow(zcta_geom) > 0){ #if there is more than 0 in the dataframe then
+    #grab the geometry
+    zcta_geom <- zcta_geom %>% st_union() %>% st_cast("MULTIPOLYGON") #union/join the geometries together and make it a multipolygon
+    data_CA_unique$geometry[i] <- zcta_geom #assign it to the geometry column
+  }
+}
+
+# Leftjoining our unique dataframe with our full dataframe ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+#YEARLY
+data_CA_geom_pop <- left_join(data_CA %>% ungroup(), data_CA_unique, by = c("ZIPCODE_5"))#combining unique geometries with the entire data set
+
+#MONTHLY leftjoin
+
+# data_CA_month_geom_pop <- left_join(data_CA %>% ungroup(), data_CA_unique, by = c("ZIPCODE_5","year","DIAG","n","month"))#combining unique geometries with the entire data set
+
+# create our SF object~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+#YEARLY 
+#final <- data_CA_geom %>% 
+data_CA_geom %>% 
+  st_as_sf() %>% #make the data a sf object
+  st_set_crs(4269) %>% #assign it a coordinate reference system (crs)
+  .[CA_counties %>% st_transform(projection) %>% st_buffer(-100) %>% st_transform(4269), ]
+  #only keep the ZCTAs that are within the Bay Area by creating an inwards buffer of the Bay Area counties' geometries
+# could comment the bay_counties portion two lines above if doing all of CA
+
+#MONTHLY~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# #final <- data_CA_geom %>% 
+# data_CA_month_geom_pop %>% 
+#   st_as_sf() %>% #make the data a sf object
+#   st_set_crs(4269) %>% #assign it a coordinate reference system (crs)
+#   .[CA_counties %>% st_transform(projection) %>% st_buffer(-100) %>% st_transform(4269), ]
+#   #only keep the ZCTAs that are within the Bay Area by creating an inwards buffer of the Bay Area counties' geometries
+# # could comment the bay_counties portion two lines above if doing all of CA
+```
+
+
+Step 4: Saving Data -- this will be used to combine with heat data and population added in HeatnHealth_CA
+```{r saving data}
+
+setwd("G:/Shared drives/SFBI-Restricted/PHS")
+
+# save data
+saveRDS(data_CA_geom, "CA_year_ZCTAS.rds")
+# saveRDS(data_CA_month_geom_pop, "CA_month_ZCTAS.rds")
+# saveRDS(final, "bay_area_season_ZCTAS.rds")
+
+
+
+```
+
+
+
