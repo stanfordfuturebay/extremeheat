@@ -1,0 +1,710 @@
+---
+title: "Untitled"
+author: "Mireille Vargas, expanded by Lange Luntao"
+date: "6/1/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(rgee)
+library(mapview)
+library(exactextractr)
+library(raster)
+library(sf)
+library(tidyverse)
+library(dplyr)
+library(tigris)
+library(leaflet)
+library(sp)
+library(rgeos)
+library(geojsonio)
+library(googledrive)
+library(stars)
+```
+
+Create Bay Area region to extract values from.
+```{r}
+bay_county_names <-
+  c(
+    "Alameda",
+    "Contra Costa",
+    "Marin",
+    "Napa",
+    "San Francisco",
+    "San Mateo",
+    "Santa Clara",
+    "Solano",
+    "Sonoma"
+  )
+
+bay_counties <-
+  counties("CA", cb = T, progress_bar = F) %>%
+  filter(NAME %in% bay_county_names) %>%
+  st_transform(4326)
+
+bay_area <- bay_counties %>% 
+  st_union()
+
+san_mateo <- bay_counties %>% 
+  filter(NAME == "San Mateo")
+
+nfo_boundary <- 
+  places("CA", cb = T, progress_bar = F) %>% 
+  filter(NAME == "North Fair Oaks") %>%
+  st_transform(4326)
+
+# bay_counties_cbg <- 
+#   block_groups("CA", bay_county_names, cb = T, progress_bar = F)
+# 
+# mapview::mapview(bay_counties_cbg)
+# 
+# #will try to remove CBG that are mostly nature preserves
+# #060816138004, 060816138001, 060816138002, 060816138003, 060855135001 
+# bay_area_urban <- 
+#   urban_areas(
+#     
+#   )
+
+#read in shapefile of urban areas 
+urban <- st_read("G:/Shared drives/SFBI-Restricted/W21 218Y Tree Team/Adjusted_Urban_Area/Adjusted_Urban_Area.shp") %>%
+  st_transform(4326)
+
+bay_area_urban <- urban[bay_area,]
+
+smc_urban <- urban[san_mateo,]
+
+mapview(bay_area_urban)
+```
+
+
+```{r pressure, echo=FALSE}
+#library(reticulate)
+#reticulate::use_condaenv("rgee", conda = "auto",required = TRUE)
+ee_Initialize()
+ee_check()
+```
+
+
+Grab the area of interest
+```{r}
+counties <- ee$FeatureCollection("TIGER/2016/Counties")
+myfilter <- ee$Filter$inList(
+  opt_leftField = "NAME",
+  opt_rightValue = list(
+    "Alameda",
+    "Contra Costa",
+    "Marin",
+    "Napa",
+    "San Francisco",
+    "San Mateo",
+    "Santa Clara",
+    "Solano",
+    "Sonoma"
+  )
+)
+
+ba_counties <- counties$filter(myfilter)
+```
+
+Creating the cloud and water mask for Landsat 8 surface reflectance 
+```{r}
+cloud_mask <- function(raster_comp){
+  #this reassigns cloud shadow pixels to clear pixels
+  cloudShadowBitMask <- bitwShiftL(1,3)
+  
+  #this reassigns cloud pixels to be clear
+  cloudsBitMask <- bitwShiftL(1,5)
+  
+  #this reassigns water pixelx to clear pixels
+  waterBitMask <- bitwShiftL(1,2)
+  
+  #select pixel_qa band and set it to a variable
+  qa <- raster_comp$select('pixel_qa')
+  
+  #Multiplies the bits in the original pixel_qa band by the new reassigned cloud shadow transparent bits
+  mask <- qa$bitwise_and(cloudShadowBitMask)$eq(0)$
+    And(qa$bitwise_and(cloudsBitMask)$eq(0))$
+    And(qa$bitwise_and(waterBitMask)$eq(0))
+  
+  #The cloud cover and cloud shadow pixels now have bit values of 1 = transparent
+  #Transparent pixels will not be include in the further analysis
+  raster_comp$updateMask(mask)
+}
+```
+
+The following code chunks is to generate various data frames for various years. In this case, 2004 to 2020.
+```{r}
+#create a dataset of dates for 2014 to 2020 (Landsat 8) and a sepertae one of 2004 to 2013 (Landsat 7)
+
+#create a data frame to iterate through for Landsat 8 
+
+years_all <- data.frame(
+  years_start = c((seq(as.Date("2014-01-01"), as.Date("2020-01-01"), by = "years"))) %>% 
+    as.character(),
+  years_end =   c((seq(as.Date("2014-12-31"), as.Date("2020-12-31"), by = "years"))) %>% 
+    as.character(),
+  years = c(seq("2014", "2020"))
+)
+
+
+#this will grab values for ndvi 
+ for (i in 1:nrow(years_all)){
+   # for (j in length(years_end)){
+     ndvi_l8srt_combo <- ee$ImageCollection("LANDSAT/LC08/C01/T1_SR")$ #Grabbing landsat 8 surface reflectance data
+     filterBounds(ba_counties)$ #filtering within the bay area counties
+     filterDate(years_all$years_start[i], years_all$years_end[i])$ #filter for the start and finish dates
+     map(cloud_mask)$ #clear the clouds, cloud shadows, and water
+     median()$ #create a median image from the image collection
+     normalizedDifference(c('B5', 'B4'))$rename("ndvi")
+
+     #extract the values
+     ndvi_bay_area_ <- ee_extract(
+      x = ndvi_l8srt_combo,
+      y = bay_counties["GEOID"],
+      scale = 30,
+      fun = ee$Reducer$mean(),
+      sf = TRUE
+     )
+     
+     ndvi_nfo_ <- ee_extract(
+      x = ndvi_l8srt_combo,
+      y = nfo_boundary["GEOID"],
+      scale = 30,
+      fun = ee$Reducer$mean(),
+      sf = TRUE
+     )
+     
+     ndvi_bay_area_urban_ <- ee_extract(
+      x = ndvi_l8srt_combo,
+      y = bay_area_urban["NAME10"],
+      scale = 30,
+      fun = ee$Reducer$mean(),
+      sf = TRUE
+     )
+      
+     #create unique dataframes to later bind
+     assign(paste0("ndvi_bay_area_", years_all$years[i], sep = ""), ndvi_bay_area_)
+     
+     #Save! Especially if you have bad wifi!!!!!!
+    saveRDS(ndvi_bay_area_, paste0("ndvi_bay_area_", years_all$years[i], ".rds"))
+    
+    assign(paste0("ndvi_nfo_", years_all$years[i], sep = ""), ndvi_nfo_)
+     
+     #Save! Especially if you have bad wifi!!!!!!
+    saveRDS(ndvi_nfo_, paste0("ndvi_nfo_", years_all$years[i], ".rds"))
+    
+    assign(paste0("ndvi_bay_area_urban_", years_all$years[i], sep = ""), ndvi_bay_area_urban_)
+     
+     #Save! Especially if you have bad wifi!!!!!!
+    saveRDS(ndvi_bay_area_urban_, paste0("ndvi_bay_area_urban_", years_all$years[i], ".rds"))
+
+    #print for your own sanity
+     print(i)
+
+ }
+```
+
+Now doing this Landsat 7
+```{r}
+years_all_7 <- data.frame(
+  years_start = c((seq(as.Date("1999-01-01"), as.Date("2013-01-01"), by = "years"))) %>% 
+    as.character(),
+  years_end =   c((seq(as.Date("1999-12-31"), as.Date("2013-12-31"), by = "years"))) %>% 
+    as.character(),
+  years = c(seq("1999", "2013"))
+)
+```
+
+```{r}
+for (i in 1:nrow(years_all_7)){
+  ndvi_l7srt_combo <- ee$ImageCollection("LANDSAT/LE07/C01/T1_SR")$ #Grabbing landsat 8 surface reflectance data
+  filterBounds(ba_counties)$ #filtering within the bay area counties
+  filterDate(years_all_7$years_start[i], years_all_7$years_end[i])$ #filter for the start and finish dates
+  map(cloud_mask)$ #clear the clouds, cloud shadows, and water
+  median()$ #create a median image from the image collection
+  normalizedDifference(c('B4', 'B3'))$rename("ndvi") #calculate ndvi based on the image's band 5 and band 4 and rename the band "ndvi"
+
+     #extract the values
+     ndvi_bay_area_ <- ee_extract(
+      x = ndvi_l7srt_combo,
+      y = bay_counties["GEOID"],
+      scale = 30,
+      fun = ee$Reducer$mean(),
+      sf = TRUE
+     )
+     
+     ndvi_nfo_ <- ee_extract(
+      x = ndvi_l7srt_combo,
+      y = nfo_boundary["GEOID"],
+      scale = 30,
+      fun = ee$Reducer$mean(),
+      sf = TRUE
+     )
+     
+     ndvi_bay_area_urban_ <- ee_extract(
+      x = ndvi_l7srt_combo,
+      y = bay_area_urban["NAME10"],
+      scale = 30,
+      fun = ee$Reducer$mean(),
+      sf = TRUE
+     )
+      
+     #create unique dataframes to later bind
+     assign(paste0("ndvi_bay_area_", years_all_7$years[i], sep = ""), ndvi_bay_area_)
+     
+     #Save! Especially if you have bad wifi!!!!!!
+    saveRDS(ndvi_bay_area_, paste0("ndvi_bay_area_", years_all_7$years[i], ".rds"))
+    
+    assign(paste0("ndvi_nfo_", years_all_7$years[i], sep = ""), ndvi_nfo_)
+     
+     #Save! Especially if you have bad wifi!!!!!!
+    saveRDS(ndvi_nfo_, paste0("ndvi_nfo_", years_all_7$years[i], ".rds"))
+    
+    assign(paste0("ndvi_bay_area_urban_", years_all_7$years[i], sep = ""), ndvi_bay_area_urban_)
+     
+     #Save! Especially if you have bad wifi!!!!!!
+    saveRDS(ndvi_bay_area_urban_, paste0("ndvi_bay_area_urban_", years_all_7$years[i], ".rds"))
+
+    #print for your own sanity
+     print(i)
+}
+```
+
+```{r}
+years_all_5 <- data.frame(
+  years_start = c((seq(as.Date("1990-01-01"), as.Date("1998-01-01"), by = "years"))) %>% 
+    as.character(),
+  years_end =   c((seq(as.Date("1990-12-31"), as.Date("1998-12-31"), by = "years"))) %>% 
+    as.character(),
+  years = c(seq("1990", "1998"))
+)
+```
+
+```{r}
+for (i in 1:nrow(years_all_5)){
+  ndvi_l5srt_combo <- ee$ImageCollection("LANDSAT/LT05/C01/T1_SR")$ #Grabbing landsat 8 surface reflectance data
+  filterBounds(ba_counties)$ #filtering within the bay area counties
+  filterDate(years_all_5$years_start[i], years_all_5$years_end[i])$ #filter for the start and finish dates
+  map(cloud_mask)$ #clear the clouds, cloud shadows, and water
+  median()$ #create a median image from the image collection
+  normalizedDifference(c('B4', 'B3'))$rename("ndvi") #calculate ndvi based on the image's band 5 and band 4 and rename the band "ndvi"
+
+     #extract the values
+     ndvi_bay_area_ <- ee_extract(
+      x = ndvi_l5srt_combo,
+      y = bay_counties["GEOID"],
+      scale = 30,
+      fun = ee$Reducer$mean(),
+      sf = TRUE
+     )
+     
+     ndvi_nfo_ <- ee_extract(
+      x = ndvi_l5srt_combo,
+      y = nfo_boundary["GEOID"],
+      scale = 30,
+      fun = ee$Reducer$mean(),
+      sf = TRUE
+     )
+      
+     ndvi_bay_area_urban_ <- ee_extract(
+      x = ndvi_l5srt_combo,
+      y = bay_area_urban["NAME10"],
+      scale = 30,
+      fun = ee$Reducer$mean(),
+      sf = TRUE
+     )
+     
+     #create unique dataframes to later bind
+     assign(paste0("ndvi_bay_area_", years_all_5$years[i], sep = ""), ndvi_bay_area_)
+     
+     #Save! Especially if you have bad wifi!!!!!!
+    saveRDS(ndvi_bay_area_, paste0("ndvi_bay_area_", years_all_5$years[i], ".rds"))
+    
+    assign(paste0("ndvi_nfo_", years_all_5$years[i], sep = ""), ndvi_nfo_)
+     
+     #Save! Especially if you have bad wifi!!!!!!
+    saveRDS(ndvi_nfo_, paste0("ndvi_nfo_", years_all_5$years[i], ".rds"))
+    
+    assign(paste0("ndvi_bay_area_urban_", years_all_5$years[i], sep = ""), ndvi_bay_area_urban_)
+     
+     #Save! Especially if you have bad wifi!!!!!!
+    saveRDS(ndvi_bay_area_urban_, paste0("ndvi_bay_area_urban_", years_all_5$years[i], ".rds"))
+
+    #print for your own sanity
+     print(i)
+}
+```
+
+```{r}
+ndvi_bay_area_all <- ndvi_bay_area_1990 %>% 
+  cbind(
+    ndvi_bay_area_1991$ndvi,
+    ndvi_bay_area_1992$ndvi,
+    ndvi_bay_area_1993$ndvi,
+    ndvi_bay_area_1994$ndvi,
+    ndvi_bay_area_1995$ndvi,
+    ndvi_bay_area_1996$ndvi,
+    ndvi_bay_area_1997$ndvi,
+    ndvi_bay_area_1998$ndvi,
+    ndvi_bay_area_1999$ndvi,
+    ndvi_bay_area_2000$ndvi,
+    ndvi_bay_area_2001$ndvi,
+    ndvi_bay_area_2002$ndvi,
+    ndvi_bay_area_2003$ndvi,
+    ndvi_bay_area_2004$ndvi,
+    ndvi_bay_area_2005$ndvi,
+    ndvi_bay_area_2006$ndvi,
+    ndvi_bay_area_2007$ndvi,
+    ndvi_bay_area_2008$ndvi,
+    ndvi_bay_area_2009$ndvi,
+    ndvi_bay_area_2010$ndvi,
+    ndvi_bay_area_2011$ndvi,
+    ndvi_bay_area_2012$ndvi,
+    ndvi_bay_area_2013$ndvi,
+    ndvi_bay_area_2014$ndvi,
+    ndvi_bay_area_2015$ndvi,
+    ndvi_bay_area_2016$ndvi,
+    ndvi_bay_area_2017$ndvi,
+    ndvi_bay_area_2018$ndvi,
+    ndvi_bay_area_2019$ndvi,
+    ndvi_bay_area_2020$ndvi
+  )
+```
+
+```{r}
+ndvi_nfo_all <- ndvi_nfo_1990 %>% 
+  cbind(
+    ndvi_nfo_1991$ndvi,
+    ndvi_nfo_1992$ndvi,
+    ndvi_nfo_1993$ndvi,
+    ndvi_nfo_1994$ndvi,
+    ndvi_nfo_1995$ndvi,
+    ndvi_nfo_1996$ndvi,
+    ndvi_nfo_1997$ndvi,
+    ndvi_nfo_1998$ndvi,
+    ndvi_nfo_1999$ndvi,
+    ndvi_nfo_2000$ndvi,
+    ndvi_nfo_2001$ndvi,
+    ndvi_nfo_2002$ndvi,
+    ndvi_nfo_2003$ndvi,
+    ndvi_nfo_2004$ndvi,
+    ndvi_nfo_2005$ndvi,
+    ndvi_nfo_2006$ndvi,
+    ndvi_nfo_2007$ndvi,
+    ndvi_nfo_2008$ndvi,
+    ndvi_nfo_2009$ndvi,
+    ndvi_nfo_2010$ndvi,
+    ndvi_nfo_2011$ndvi,
+    ndvi_nfo_2012$ndvi,
+    ndvi_nfo_2013$ndvi,
+    ndvi_nfo_2014$ndvi,
+    ndvi_nfo_2015$ndvi,
+    ndvi_nfo_2016$ndvi,
+    ndvi_nfo_2017$ndvi,
+    ndvi_nfo_2018$ndvi,
+    ndvi_nfo_2019$ndvi,
+    ndvi_nfo_2020$ndvi
+  )
+```
+
+
+
+```{r}
+
+#CHANGE TO BAY_AREA_URBAN
+ndvi_bay_area_urban_all <- ndvi_bay_area_urban_1990 %>% 
+  cbind(
+    ndvi_bay_area_urban_1991$ndvi,
+    ndvi_bay_area_urban_1992$ndvi,
+    ndvi_bay_area_urban_1993$ndvi,
+    ndvi_bay_area_urban_1994$ndvi,
+    ndvi_bay_area_urban_1995$ndvi,
+    ndvi_bay_area_urban_1996$ndvi,
+    ndvi_bay_area_urban_1997$ndvi,
+    ndvi_bay_area_urban_1998$ndvi,
+    ndvi_bay_area_urban_1999$ndvi,
+    ndvi_bay_area_urban_2000$ndvi,
+    ndvi_bay_area_urban_2001$ndvi,
+    ndvi_bay_area_urban_2002$ndvi,
+    ndvi_bay_area_urban_2003$ndvi,
+    ndvi_bay_area_urban_2004$ndvi,
+    ndvi_bay_area_urban_2005$ndvi,
+    ndvi_bay_area_urban_2006$ndvi,
+    ndvi_bay_area_urban_2007$ndvi,
+    ndvi_bay_area_urban_2008$ndvi,
+    ndvi_bay_area_urban_2009$ndvi,
+    ndvi_bay_area_urban_2010$ndvi,
+    ndvi_bay_area_urban_2011$ndvi,
+    ndvi_bay_area_urban_2012$ndvi,
+    ndvi_bay_area_urban_2013$ndvi,
+    ndvi_bay_area_urban_2014$ndvi,
+    ndvi_bay_area_urban_2015$ndvi,
+    ndvi_bay_area_urban_2016$ndvi,
+    ndvi_bay_area_urban_2017$ndvi,
+    ndvi_bay_area_urban_2018$ndvi,
+    ndvi_bay_area_urban_2019$ndvi,
+    ndvi_bay_area_urban_2020$ndvi
+  )
+```
+
+
+```{r}
+saveRDS(ndvi_nfo_all, "ndvi_nfo_all.rds")
+saveRDS(ndvi_bay_area_all, "ndvi_bay_area_all_90.rds")
+saveRDS(ndvi_bay_area_urban_all, "ndvi_bay_area_urban_all.rds")
+```
+
+```{r}
+ndvi_bay_area_all <- readRDS("/Volumes/GoogleDrive/Shared drives/SFBI-Restricted/W21 218Y Tree Team/NFO_data/ndvi_bay_area_all_90.rds")
+ndvi_nfo_all <- readRDS("/Volumes/GoogleDrive/Shared drives/SFBI-Restricted/W21 218Y Tree Team/NFO_data/ndvi_nfo_all.rds")
+ndvi_bay_area_urban_all <- readRDS("/Volumes/GoogleDrive/Shared drives/SFBI-Restricted/W21 218Y Tree Team/NFO_data/ndvi_bay_area_urban_all.rds")
+```
+
+```{r}
+ndvi_sum_ba <- ndvi_bay_area_all %>% 
+  st_drop_geometry() %>% 
+  select(
+    !GEOID
+  ) %>% 
+  map_dbl(mean) %>% 
+  as.data.frame() %>% 
+  cbind(seq(1990, 2020)) %>% 
+  rename(
+    NDVI = ".",
+    Year = "seq(1990, 2020)"
+  )
+
+ndvi_sum_ba$Region <- rep("Bay Area", nrow(ndvi_sum_ba))
+```
+
+```{r}
+#Doing this for NFO
+ndvi_sum_nfo <- ndvi_nfo_all %>% 
+  st_drop_geometry() %>% 
+  select(
+    !GEOID
+  ) %>% 
+  map_dbl(mean) %>% 
+  as.data.frame() %>% 
+  cbind(seq(1990, 2020)) %>% 
+  rename(
+    NDVI = ".",
+    Year = "seq(1990, 2020)"
+  )
+
+ndvi_sum_nfo$Region <- rep("North Fair Oaks", nrow(ndvi_sum_nfo))
+```
+
+```{r}
+SMC_boundary <- 
+  counties(
+    "CA", cb = T, progress_bar = F
+  ) %>% 
+  filter(
+    NAME == "San Mateo"
+  ) %>% 
+  st_transform(4326)
+
+SMC_ndvi <- ndvi_bay_area_all[SMC_boundary,]
+
+ndvi_sum_SMC <- SMC_ndvi %>% 
+  st_drop_geometry() %>% 
+  select(
+    !GEOID
+  ) %>% 
+  map_dbl(mean) %>% 
+  as.data.frame() %>% 
+  cbind(seq(1990, 2020)) %>% 
+  rename(
+    NDVI = ".",
+    Year = "seq(1990, 2020)"
+  )
+
+ndvi_sum_SMC$Region <- rep("San Mateo County", nrow(ndvi_sum_SMC))
+```
+
+Now doing urban regions
+```{r}
+ndvi_sum_ba_urban <- ndvi_bay_area_urban_all %>% 
+  st_drop_geometry() %>% 
+  select(
+    !NAME10
+  ) %>% 
+  map_dbl(mean) %>% 
+  as.data.frame() %>% 
+  cbind(seq(1990, 2020)) %>% 
+  rename(
+    NDVI = ".",
+    Year = "seq(1990, 2020)"
+  )
+
+ndvi_sum_ba_urban$Region <- rep("Bay Area Urban", nrow(ndvi_sum_ba_urban))
+```
+
+```{r}
+
+SMC_ndvi_urban <- ndvi_bay_area_urban_all[SMC_boundary,]
+
+ndvi_sum_SMC_urban <- SMC_ndvi_urban %>% 
+  st_drop_geometry() %>% 
+  select(
+    !NAME10
+  ) %>% 
+  map_dbl(mean) %>% 
+  as.data.frame() %>% 
+  cbind(seq(1990, 2020)) %>% 
+  rename(
+    NDVI = ".",
+    Year = "seq(1990, 2020)"
+  )
+
+ndvi_sum_SMC_urban$Region <- rep("San Mateo County Urban", nrow(ndvi_sum_SMC_urban))
+```
+
+
+
+```{r}
+#now let's rbind data ONLY FOR BAY AREA AND SAN MATEO COUNTY
+ndvi_all_ba_vs_SMC <- ndvi_sum_ba %>% 
+  rbind(
+    ndvi_sum_SMC
+  ) 
+
+ndvi_all_ba_vs_SMC %>% 
+  ggplot(
+    aes(
+      x = Year,
+      y = NDVI,
+      color = Region
+    )
+  ) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "NDVI from 1990 to 2020 in the Bay Area"
+  ) +
+  scale_y_continuous(limits = c(.2, .5)) + 
+  scale_color_manual(values=c("#e6261f", "#d23be7")) +
+  ggsave("ndvi_all_ba_vs_SMC.png")
+```
+
+```{r}
+#now let's rbind data ONLY FOR URBAN
+ndvi_all_ba_vs_SMC_urban <- ndvi_sum_ba_urban %>% 
+  rbind(
+    ndvi_sum_SMC_urban
+  ) 
+
+ndvi_all_ba_vs_SMC_urban %>% 
+  ggplot(
+    aes(
+      x = Year,
+      y = NDVI,
+      color = Region
+    )
+  ) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "NDVI from 1990 to 2020 in the Bay Area - Urban Regions Only"
+  ) +
+  scale_y_continuous(limits = c(.2, .5)) +
+  scale_color_manual(values=c("#eb7532", "#4355db")) +
+  ggsave("ndvi_all_ba_vs_SMC_urban.png")
+
+```
+
+```{r}
+#now let's graph data ONLY FOR NFO
+
+ndvi_sum_nfo %>% 
+  ggplot(
+    aes(
+      x = Year,
+      y = NDVI,
+      color = Region
+    )
+  ) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "NDVI from 1990 to 2020 in the Bay Area - NFO  Only"
+  ) +
+  scale_y_continuous(limits = c(.2, .5)) +
+  scale_color_manual(values=c("#37b41b")) +
+  ggsave("ndvi_all_NFO.png")
+
+```
+
+```{r}
+#now let's rbind data - GRAPH 2, BAY AREA + URBAN/RURAL
+ndvi_all_ba_graph2 <- ndvi_sum_ba %>% 
+  rbind(
+    ndvi_sum_SMC
+  ) %>% 
+  rbind(
+    ndvi_sum_ba_urban
+  ) %>% 
+  rbind(
+    ndvi_sum_SMC_urban
+  )
+
+
+ndvi_all_ba_graph2 %>% 
+  ggplot(
+    aes(
+      x = Year,
+      y = NDVI,
+      color = Region
+    )
+  ) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "NDVI from 1990 to 2020 in the Bay Area"
+  ) +
+  scale_y_continuous(limits = c(.2, .5)) +
+  scale_color_manual(values=c(#e6261f", "#d23be7", "#eb7532", "#4355db")) +
+  ggsave("ndvi_all_ba_graph2.png")
+
+```
+
+```{r}
+#now let's rbind data - FOR ALL
+ndvi_all <- ndvi_sum_ba %>% 
+  rbind(
+    ndvi_sum_SMC
+  ) %>% 
+  rbind(
+    ndvi_sum_nfo
+  ) %>% 
+  rbind(
+    ndvi_sum_ba_urban
+  ) %>% 
+  rbind(
+    ndvi_sum_SMC_urban
+  )
+
+
+
+#Now let's just do a simple ggplot linear graph (or scatter plot?)
+ndvi_all %>% 
+  ggplot(
+    aes(
+      x = Year,
+      y = NDVI,
+      color = Region
+    )
+  ) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "NDVI from 1990 to 2020 in the Bay Area"
+  )
+  
+```
