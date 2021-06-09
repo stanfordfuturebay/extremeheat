@@ -1,0 +1,168 @@
+---
+title: "Bus stops"
+author: "Mireille Vargas"
+date: "5/25/2021"
+output: html_document
+---
+This grabs the bus stops in North Fair Oaks and East Palo Alto. A 1/16th mile buffer is made around them and parcels whose centroid falls within the buffers are given a "Yes".
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidytransit)
+library(purrr)
+library(sf)
+library(dplyr)
+library(tidyverse)
+library(leaflet)
+library(tigris)
+```
+
+
+```{r}
+
+#gtfs_vta <- read_gtfs("https://gtfs.vta.org/gtfs_vta.zip")
+gtfs_vta <- read_gtfs("gtfs_vta.zip")
+gtfs_samtrans <- read_gtfs("https://www.samtrans.com/Assets/GTFS/samtrans/ST-GTFS.zip")
+gtfs_feed <- list("gtfs_vta"=gtfs_vta, "gtfs_samtrans"=gtfs_samtrans)
+get_stops <- function(gtfs_data, name) {
+  gtfs_data$stops %>% 
+  select(stop_id,stop_lon,stop_lat,stop_name) %>% 
+  mutate(id = paste0(name,"-",stop_id)) 
+}
+stops <- map2_dfr(gtfs_feed, c("VTA","SamTrans"),get_stops) %>% 
+  rename("lon"="stop_lon", "lat"="stop_lat") %>% 
+  select(id,lon,lat,stop_name) #%>% 
+  #saveRDS("rds/stops.rds")
+
+stops <- stops %>% 
+  st_as_sf(coords = c("lon", "lat"),
+           crs = 4326)
+```
+
+Now let's filter to only North Fair Oaks
+```{r}
+nfo_boundary <- 
+  places("CA", cb = T, progress_bar = F) %>% 
+  filter(NAME == "North Fair Oaks") %>%
+  st_transform(4326)
+
+nfo_stops <- stops[nfo_boundary,]
+
+#now let's visualize these bus stops
+mapview::mapview(nfo_stops)
+```
+
+Cool! From here we can decide to do either the buffer method or the safegraph method!
+
+Method 1: Bus stop buffers
+```{r}
+#let's create the buffers of 1/16th mile around the bus stops
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs"
+
+nfo_stops_buffer <-
+  nfo_stops %>% 
+  st_transform(projection) %>% 
+  st_buffer(330) %>%  #330 feet is 1/16th of a mile
+  st_transform(4269) 
+
+mapview::mapview(nfo_stops_buffer)
+```
+
+Now we will bring in the NFO parcels and see if they intersect with the bus stop buffers
+```{r}
+nfo_parcels_geom <- readRDS("G:/Shared drives/SFBI-Restricted/W21 218Y Tree Team/NFO_data/nfo_parcels_geom.rds")
+
+mapview::mapview(nfo_stops_buffer, col.regions = "red", layer.name = "bus stop buffers") + mapview::mapview(nfo_parcels_geom, layer.name = "NFO parcels")
+```
+
+
+```{r}
+#will probably have to do an st_intersects of the st_centroids of the parcels
+#first make the bus stops into one polygon
+nfo_stops_buffer_combo <- nfo_stops_buffer %>% 
+  st_union() 
+
+parcels_bus_stops <- nfo_parcels_geom %>% 
+  mutate(
+    bus_stop = ifelse(
+      st_intersects(
+        nfo_parcels_geom %>% 
+          st_centroid(),
+        nfo_stops_buffer_combo,
+        sparse = FALSE
+      ), "Yes", "No"
+    )
+  )
+
+parcels_bus_stops$bus_stop <- parcels_bus_stops$bus_stop %>% 
+  as.vector()
+
+parcels_and_bus <- parcels_bus_stops %>% 
+  select(
+    APN,
+    bus_stop
+  ) %>% 
+  rename(
+    bus_stop_proximity = "bus_stop"
+  ) %>% 
+  st_drop_geometry()
+parcels_and_bus <- parcels_and_bus[order(parcels_and_bus$APN),]
+
+write.csv(parcels_and_bus, "parcels_and_bus.csv")
+
+mapview::mapview(parcels_bus_stops, zcol = "bus_stop", col.regions = c("grey", "red"))
+
+```
+Now we will do the same for EPA
+```{r}
+epa_boundary <- 
+  places("CA", cb = T, progress_bar = F) %>% 
+  filter(NAME == "East Palo Alto") %>%
+  st_transform(4326)
+
+epa_stops <- stops[epa_boundary,]
+
+mapview::mapview(epa_stops)
+
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs"
+
+epa_stops_buffer <-
+  epa_stops %>% 
+  st_transform(projection) %>% 
+  st_buffer(330) %>%  #330 feet is 1/16th of a mile
+  st_transform(4269) 
+
+#read in EPA parcels
+epa_parcels <- readRDS("G:/Shared drives/SFBI-Restricted/W21 218Y Tree Team/EPA_data/epa_parcels.rds") 
+
+epa_stops_buffer_combo <- epa_stops_buffer %>% 
+  st_union() 
+
+parcels_bus_stops <- epa_parcels %>% 
+  mutate(
+    bus_stop = ifelse(
+      st_intersects(
+        epa_parcels %>% 
+          st_centroid(),
+        epa_stops_buffer_combo,
+        sparse = FALSE
+      ), "Yes", "No"
+    )
+  )
+
+parcels_bus_stops$bus_stop <- parcels_bus_stops$bus_stop %>% 
+  as.vector()
+
+parcels_and_bus <- parcels_bus_stops %>% 
+  select(
+    APN,
+    bus_stop
+  ) %>% 
+  rename(
+    bus_stop_proximity = "bus_stop"
+  )
+saveRDS(parcels_and_bus,"epa_bus_stops.rds")
+```
+
