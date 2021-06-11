@@ -1,0 +1,596 @@
+---
+title: "RGEE CA"
+output: html_document
+author: "Maggie Ford"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This code will grab ndvi (normalized difference vegetation index), and lst (land surface temperature). The values from the images are then extracted for each ZCTA geometry from the data.
+
+This is done for both Landsat 7 and Landsat 8 to give a time range from 2004-2020.
+
+```{r packages}
+#install.packages("rgee")
+
+#these lines are specifically to get python environment named "rgee" working. if your setup works
+#feel free to comment these lines out. if your python environment has a different name, please replace the first argument in reticulate::use_condaenv.
+
+#in order for these lines to do their job, they must be the first command run on a fresh rstudio instance.
+library(reticulate)
+reticulate::use_condaenv("rgee", conda = "auto",required = TRUE)
+
+#in case your computer isn't allocating enough memory to run the code
+memory.limit(64000)
+
+library(rgee)
+library(mapview)
+library(exactextractr)
+library(raster)
+library(sf)
+library(tidyverse)
+library(dplyr)
+library(tigris)
+library(leaflet)
+library(sp)
+library(rgeos)
+library(geojsonio)
+library(googledrive)
+library(stars)
+
+#only needs to be run once total per computer/setup (in theory).
+#ee_install(py_env = "rgee")
+```
+
+Load in the data sets, before you initialize google earth engine
+```{r load}
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs"
+
+data_ca_month <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/CA_month_ZCTAS_m.rds") %>% 
+  select(ZIPCODE_5, geometry)
+#data_ca_year <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/CA_year_ZCTAS_m.rds") %>% 
+#  select(ZIPCODE_5, geometry)
+#data_ca_season <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/CA_season_ZCTAS_m.rds") %>% 
+#  select(ZIPCODE_5, geometry)
+
+#Merge the data
+data_ca_merge <- data_ca_month %>% 
+  rbind(data_ca_year) %>% 
+  rbind(data_ca_season) %>% 
+  ungroup() %>%
+  st_as_sf() %>%
+  as.data.frame() %>%
+  st_as_sf() %>%
+  unique()
+```
+
+
+```{r verify, echo=FALSE}
+# initialize, then double check that your rgee install is working
+ee_Initialize()
+ee_check()
+```
+
+
+Grab the area of interest
+```{r spacefilter}
+#06 is the code for CA
+counties <- ee$FeatureCollection("TIGER/2016/Counties")
+ myfilter <- ee$Filter$inList(
+   opt_leftField = "STATEFP",
+   opt_rightValue = list(
+     "06"
+   )
+ )
+
+ca_counties <- counties$filter(myfilter)
+```
+
+Creating the cloud and water mask for Landsat 8 surface reflectance 
+```{r cloudmask}
+cloud_mask <- function(raster_comp){
+  #this reassigns cloud shadow pixels to clear pixels
+  cloudShadowBitMask <- bitwShiftL(1,3)
+  
+  #this reassigns cloud pixels to be clear
+  cloudsBitMask <- bitwShiftL(1,5)
+  
+  #this reassigns water pixelx to clear pixels
+  waterBitMask <- bitwShiftL(1,2)
+  
+  #select pixel_qa band and set it to a variable
+  qa <- raster_comp$select('pixel_qa')
+  
+  #Multiplies the bits in the original pixel_qa band by the new reassigned cloud shadow transparent bits
+  mask <- qa$bitwise_and(cloudShadowBitMask)$eq(0)$
+    And(qa$bitwise_and(cloudsBitMask)$eq(0))$
+    And(qa$bitwise_and(waterBitMask)$eq(0))
+  
+  #The cloud cover and cloud shadow pixels now have bit values of 1 = transparent
+  #Transparent pixels will not be include in the further analysis
+  raster_comp$updateMask(mask)
+}
+```
+
+
+The following code chunks is to generate various data frames for various years. In this case, 2014 to 2020.
+```{r timefilter8}
+#landsat 8 covers the years 2014-2020, landsat 7 covers the years 2004-2013.
+#create a dataset of dates for 2014 to 2020 (Landsat 8) and a separate one of 2004 to 2013 (Landsat 7)
+
+#only one of the below time filters can be used at a time. both included for convenience
+
+#for filtering Landsat 8 data by years
+years_all <- data.frame(
+  years_start = c((seq(as.Date("2014-01-01"), as.Date("2020-01-01"), by = "years"))) %>% 
+    as.character(),
+  years_end =   c((seq(as.Date("2014-12-31"), as.Date("2020-12-31"), by = "years"))) %>% 
+    as.character(),
+  years = c(seq("2014", "2020"))
+)
+
+# for filtering Landsat 8 data by months
+months_all <- data.frame(
+  months_start = c((seq(as.Date("2014-01-01"), as.Date("2020-12-01"), by = "months"))) %>% 
+    as.character(),
+  months_end =   c((seq(as.Date("2014-01-31"), as.Date("2020-12-31"), by = "months"))) %>% 
+    as.character(),
+  months = c(seq("01", "12")),
+  years = c(rep(2014:2020, each=12))
+)
+```
+
+```{r 8iter}
+# these variables are used for chunking the dataframe into smaller pieces that don't violate
+# the memory limit of the ee_extract function.
+slice_sz = 200
+n_obsv = 1375 #n ZCTAs
+n_slice = floor(n_obsv/slice_sz)
+```
+
+```{r ndvi}
+#this will grab values for ndvi by month
+# for (i in 5) {
+for (i in 1:nrow(months_all)){
+   # for (j in length(years_end)){
+     ndvi_l8srt_combo <- ee$ImageCollection("LANDSAT/LC08/C01/T1_SR")$ #Grabbing landsat 8 surface reflectance data
+     filterBounds(ca_counties)$ #filtering within the bay =[-0rea counties
+     filterDate(months_all$months_start[i], months_all$months_end[i])$ #filter for the start and finish dates
+       
+     map(cloud_mask)$ #clear the clouds, cloud shadows, and water
+     median()$ #create a median image from the image collection
+     normalizedDifference(c('B5', 'B4'))$rename("ndvi")
+
+     for (j in 1:n_slice) {
+      ee_selection = data_ca_merge["ZIPCODE_5"]%>%slice((1 + (j-1)*slice_sz):(j*slice_sz))
+      #print(paste0("grabbing entries ", (1+(j-1)*(slice_sz)), " to ", j*slice_sz))
+       #extract the values
+      ndvi_ca_ <- ee_extract(
+        x = ndvi_l8srt_combo,
+        y = ee_selection,
+        scale = 30,
+        fun = ee$Reducer$mean(),
+        sf = TRUE
+      )
+      #create unique dataframes to later bind
+      assign(paste0("ndvi_ca_", months_all$years[i], "-", months_all$months[i], j, sep = ""), ndvi_ca_)
+
+      #Save! Especially if you have bad wifi!!!!!!
+      saveRDS(ndvi_ca_, paste0("ndvi_ca_", months_all$years[i], "-", months_all$months[i], "_chunk_", j, ".rds"))
+
+      #print for your sanity
+      #print(paste0("done with chunk ", j, " of year ", i))
+     }
+     
+     ee_selection = data_ca_merge["ZIPCODE_5"]%>%slice(((n_slice*slice_sz)+1):n_obsv)
+     #print(paste0("grabbing entries ", (n_slice*slice_sz)+1, " to ", n_obsv))
+     #last = data_ca_merge["ZIPCODE_5"]%>%slice(1201:1375)
+     #this is for processing the remainder chunk
+     ndvi_ca_ <- ee_extract(
+        x = ndvi_l8srt_combo,
+        y = ee_selection,
+        scale = 30,
+        fun = ee$Reducer$mean(),
+        sf = TRUE
+      )
+      #create unique dataframes to later bind
+      assign(paste0("ndvi_ca_", months_all$years[i], "-", months_all$months[i], (n_slice+1), sep = ""), ndvi_ca_)
+     
+      #Save! Especially if you have bad wifi!!!!!!
+      saveRDS(ndvi_ca_, paste0("ndvi_ca_", months_all$years[i], "-", months_all$months[i], "_chunk_", (n_slice+1), ".rds"))
+     
+    #print for your own sanity
+     print(paste0("done with year ",i, " for ndvi for sat8"))
+  
+}
+```
+
+```{r lst8}
+
+slice_sz = 100 #ee_extract can handle up to like 500 entries at a time seemingly
+n_obsv = 1375
+n_slice = floor(n_obsv/slice_sz)
+#Now doing this for land surface temperature
+counties <- ee$FeatureCollection("TIGER/2016/Counties")
+
+for (i in 1:nrow(months_all)){
+  if ((months_all_7$months[i] == 5)||(months_all_7$months[i] == 6)||(months_all_7$months[i] == 7)||(months_all_7$months[i] == 8)) {
+  med <- ee$ImageCollection("LANDSAT/LC08/C01/T1_SR")$ #Grabbing landsat 8 surface reflectance data
+  filterBounds(ca_counties)$ #filtering within the ca area counties
+  filterDate(months_all$months_start[i], months_all$months_end[i])$ #filter for the start and finish dates
+  map(cloud_mask)$ #clear the clouds, cloud shadows, and water
+  median()
+
+  ndvi <- med$normalizedDifference(c('B5', 'B4'))$rename("ndvi")
+
+  thermal <- med$select('B10')$multiply(0.1)  
+    
+  for (j in 1:n_slice) {
+    cur_geo = data_ca_merge["geometry"]%>%slice((1 +(j-1)*slice_sz):(j*slice_sz))
+    cur_counties = sf_as_ee(cur_geo)
+ 
+    ndvi_min <- ee$Number(ndvi$reduceRegion(
+      reducer = ee$Reducer$min(),
+      geometry = cur_counties,
+      scale =  30,
+      maxPixels = 1e9
+    )$values()$get(0))
+
+    ndvi_max <- ee$Number(ndvi$reduceRegion(
+      reducer = ee$Reducer$max(),
+      geometry = cur_counties,
+      scale =  30,
+      maxPixels = 1e9
+    )$values()$get(0))
+
+    #fractional vegetation
+    fv <- (ndvi$subtract(ndvi_min)$divide(ndvi_max$subtract(ndvi_min)))$pow(ee$Number(2))$rename('FV')
+
+    #Emissivity
+    a <- ee$Number(0.004)
+    b <- ee$Number(0.986)
+    EM <- fv$multiply(a)$add(b)$rename('EMM')
+
+    #calculate land surface temperature (this is in celsius)
+    LST <- thermal$expression(
+      '(Tb/(1 + (0.00115* (Tb / 1.438))*log(Ep)))-273.15',
+      opt_map = list(
+        'Tb'= thermal$select('B10'),
+        'Ep'= EM$select('EMM')
+      )
+    )$rename('LST')
+
+    LST <- LST$expression( #convert to fahrenheit
+      '(temp * 9/5) + 32',
+      opt_map = list(
+        'temp'= LST$select('LST')
+      )
+    )$rename('LST')
+    ##### ITER BEGIN
+  
+    ee_selection = data_ca_merge["ZIPCODE_5"]%>%slice((1 +(j-1)*slice_sz):(j*slice_sz))
+    lst_ca <- ee_extract(
+      x = LST,
+      y = ee_selection,
+      scale = 30,
+      fun = ee$Reducer$mean(),
+      sf = TRUE
+    )
+
+    #create unique dataframes to later bind
+    assign(paste0("lst_ca_", months_all$years[i], "-", months_all$months[i], sep = ""), lst_ca)
+
+    #Save! Especially if you have bad wifi!!!!!!
+    saveRDS(lst_ca, paste0("lst_ca_",months_all$years[i], "-", months_all$months[i], "_chunk_", j, ".rds"))
+    #print for your sanity
+    print(paste0("done with chunk ", j, " of year/month  ", i))
+  }
+
+  ee_selection = data_ca_merge["ZIPCODE_5"]%>%slice(((n_slice*slice_sz)+1):n_obsv)
+
+  lst_ca <- ee_extract(
+    x = LST,
+    y = ee_selection,
+    scale = 30,
+    fun = ee$Reducer$mean(),
+    sf = TRUE
+  )
+  #create unique dataframes to later bind
+  assign(paste0("lst_ca_",months_all$years[i], "-", months_all$months[i], (n_slice+1), sep = ""), lst_ca)
+
+  #Save! Especially if you have bad wifi!!!!!!
+  saveRDS(lst_ca, paste0("lst_ca_",months_all$years[i], "-", months_all$months[i], "_chunk_", (n_slice+1), ".rds"))
+
+  #print for your own sanity
+  print(paste0("done with year/month ", i, " for LST for sat8"))
+}
+}
+
+```
+
+same code, but for the timeframe covered by landsat7
+```{r timefilter7}
+# once again, only one time filter can be used at a time. both included for user's convenience
+
+# for filtering Landsat 7 data by years
+years_all_7 <- data.frame(
+  years_start = c((seq(as.Date("2004-01-01"), as.Date("2013-01-01"), by = "years"))) %>%
+    as.character(),
+  years_end =   c((seq(as.Date("2004-12-31"), as.Date("2013-12-31"), by = "years"))) %>%
+    as.character(),
+  years = c(seq("2004", "2013"))
+)
+
+# for filtering Landsat 7 data by months
+months_all_7 <- data.frame(
+  months_start = c((seq(as.Date("2004-01-01"), as.Date("2013-12-01"), by = "months"))) %>%
+    as.character(),
+  months_end = c((seq(as.Date("2004-01-31"), as.Date("2013-12-31"), by = "months"))) %>%
+    as.character(),
+  months = c(seq("01", "12")),
+  years = c(rep(2004:2013, each=12))
+)
+```
+
+``` {r 7iter}
+# i was having difficulty getting the LANDSAT7 data with a chunk size of 200 ZCTAs at a time, 
+# so i had to shorten the chunk size to 100 to get the code to run.
+slice_sz = 100
+n_obsv = 1375
+n_slice = floor(n_obsv/slice_sz)
+```
+
+```{r lst7}
+#Now doing this for land surface temperature
+counties <- ee$FeatureCollection("TIGER/2016/Counties")
+
+for (i in 67:nrow(months_all_7)){
+#if ((months_all_7$months[i] == 5)||(months_all_7$months[i] == 6)||(months_all_7$months[i] == 7)||(months_all_7$months[i] == 8)) {
+  med <- ee$ImageCollection("LANDSAT/LE07/C01/T1_SR")$ #Grabbing landsat 8 surface reflectance data
+  filterBounds(ca_counties)$ #filtering within the ca area counties
+  filterDate(months_all_7$months_start[i], months_all_7$months_end[i])$ #filter for the start and finish dates
+  map(cloud_mask)$ #clear the clouds, cloud shadows, and water
+  median()
+
+  ndvi <- med$normalizedDifference(c('B4', 'B3'))$rename("ndvi")
+
+  thermal <- med$select('B6')$multiply(0.1)  
+    
+  for (j in 1:n_slice) {
+    cur_geo = data_ca_merge["geometry"]%>%slice((1 +(j-1)*slice_sz):(j*slice_sz))
+    cur_counties = sf_as_ee(cur_geo)
+ 
+    ndvi_min <- ee$Number(ndvi$reduceRegion(
+      reducer = ee$Reducer$min(),
+      geometry = cur_counties,
+      scale =  30,
+      maxPixels = 1e9
+    )$values()$get(0))
+
+    ndvi_max <- ee$Number(ndvi$reduceRegion(
+      reducer = ee$Reducer$max(),
+      geometry = cur_counties,
+      scale =  30,
+      maxPixels = 1e9
+    )$values()$get(0))
+
+    #fractional vegetation
+    fv <- (ndvi$subtract(ndvi_min)$divide(ndvi_max$subtract(ndvi_min)))$pow(ee$Number(2))$rename('FV')
+
+    #Emissivity
+    a <- ee$Number(0.004)
+    b <- ee$Number(0.986)
+    EM <- fv$multiply(a)$add(b)$rename('EMM')
+
+    #calculate land surface temperature (this is in celsius)
+    LST <- thermal$expression(
+      '(Tb/(1 + (0.00115* (Tb / 1.438))*log(Ep)))-273.15',
+      opt_map = list(
+        'Tb'= thermal$select('B6'),
+        'Ep'= EM$select('EMM')
+      )
+    )$rename('LST')
+
+    LST <- LST$expression( #convert to fahrenheit
+      '(temp * 9/5) + 32',
+      opt_map = list(
+        'temp'= LST$select('LST')
+      )
+    )$rename('LST')
+     # slice iteration
+  
+    ee_selection = data_ca_merge["ZIPCODE_5"]%>%slice((1 +(j-1)*slice_sz):(j*slice_sz))
+    lst_ca <- ee_extract(
+      x = LST,
+      y = ee_selection,
+      scale = 30,
+      fun = ee$Reducer$mean(),
+      sf = TRUE
+    )
+
+    #create unique dataframes to later bind
+    assign(paste0("lst_ca_", months_all_7$years[i], "-", months_all_7$months[i], sep = ""), lst_ca)
+
+    #Save! Especially if you have bad wifi!!!!!!
+    saveRDS(lst_ca, paste0("lst_ca_",months_all_7$years[i], "-", months_all_7$months[i], "_chunk_", j, ".rds"))
+    #print for your sanity
+    print(paste0("done with chunk ", j, " of year/month  ", i))
+  }
+
+  ee_selection = data_ca_merge["ZIPCODE_5"]%>%slice(((n_slice*slice_sz)+1):n_obsv)
+
+  lst_ca <- ee_extract(
+    x = LST,
+    y = ee_selection,
+    scale = 30,
+    fun = ee$Reducer$mean(),
+    sf = TRUE
+  )
+  #create unique dataframes to later bind
+  assign(paste0("lst_ca_",months_all_7$years[i], "-", months_all_7$months[i], (n_slice+1), sep = ""), lst_ca)
+
+  #Save! Especially if you have bad wifi!!!!!!
+  saveRDS(lst_ca, paste0("lst_ca_",months_all_7$years[i], "-", months_all_7$months[i], "_chunk_", (n_slice+1), ".rds"))
+
+  #print for your own sanity
+  print(paste0("done with year/month ", i, " for LST for sat8"))
+#}
+}
+```
+
+```{r ndvi7}
+# for (i in 1:nrow(years_all_7)){
+#   ndvi_l7srt_combo <- ee$ImageCollection("LANDSAT/LE07/C01/T1_SR")$ #Grabbing landsat 8 surface reflectance data
+#   filterBounds(ca_counties)$ #filtering within the bay area counties
+#   filterDate(years_all_7$years_start[i], years_all_7$years_end[i])$ #filter for the start and finish dates
+#   map(cloud_mask)$ #clear the clouds, cloud shadows, and water
+#   median()$ #create a median image from the image collection
+#   normalizedDifference(c('B4', 'B3'))$rename("ndvi") #calculate ndvi based on the image's band 5 and band 4 and rename the band "ndvi"
+# 
+#   
+#   # slice iteration
+#   for (j in 1:n_slice) {
+#     ndvi_ca <- ee_extract(
+#       x = ndvi_l7srt_combo,
+#       y = data_ca_merge["ZIPCODE_5"]%>%slice((1 + (j-1)*slice_sz):(j*slice_sz)),
+#       scale = 30,
+#       fun = ee$Reducer$mean(),
+#       sf = TRUE
+#     )
+#   
+#     #create unique dataframes to later bind
+#     assign(paste0("ndvi_ca_", years_all_7$years[i], j, sep = ""), ndvi_ca)
+#   
+#     #Save! Especially if you have bad wifi!!!!!!
+#     saveRDS(ndvi_ca_, paste0("ndvi_ca_", years_all_7$years[i], "_chunk_", j, ".rds"))
+#     #print for your sanity
+#     print(paste0("done with chunk ", j, " of year ", i))
+#     
+#   }
+#   ndvi_ca <- ee_extract(
+#       x = ndvi_l7srt_combo,
+#       y = data_ca_merge["ZIPCODE_5"]%>%slice(((n_slice*slice_sz)+1):n_obsv),
+#       scale = 30,
+#       fun = ee$Reducer$mean(),
+#       sf = TRUE
+#   )
+#   #create unique dataframes to later bind
+#   assign(paste0("ndvi_ca_", years_all_7$years[i], (n_slice+1), sep = ""), ndvi_ca)
+#   
+#   #Save! Especially if you have bad wifi!!!!!!
+#   saveRDS(ndvi_ca_, paste0("ndvi_ca_", years_all_7$years[i], "_chunk_", (n_slice+1), ".rds"))
+#   
+#   #print for your own sanity
+#   print(paste0("done with year ", i, " for ndvi for sat7"))
+# }
+```
+
+
+grabbing maximum daily temperature from GridMet
+```{r timefilter_gridmet}
+# for filtering gridmet data by years
+# currently not used by temp_gridmet, but is an easy swap to do.
+ years_all_gridmet <- data.frame(
+   years_start = c((seq(as.Date("2004-01-01"), as.Date("2020-01-01"), by = "years"))) %>%
+     as.character(),
+   years_end =   c((seq(as.Date("2004-12-31"), as.Date("2020-12-31"), by = "years"))) %>%
+     as.character(),
+   years = c(seq("2004", "2020"))
+ )
+
+# for filtering gridmet data by months
+# this filter is currently in use via temp_gridmet.
+ months_all_gridmet <- data.frame(
+   months_start = c((seq(as.Date("2015-01-01"), as.Date("2020-12-01"), by = "months"))) %>%
+     as.character(),
+   months_end = c((seq(as.Date("2015-01-31"), as.Date("2020-12-31"), by = "months"))) %>%
+     as.character(),
+   months = c(seq("01", "12")),
+   years = c(rep(2015:2020, each=12))
+ )
+```
+
+# note: resolution is 4 km. This will grab the maximum temperature for each day in that month and take the median (maximum) value for that month.
+# this code could be modified to count days over a certain max temperature instead, and used to gather different temperature data.
+```{r temp_gridmet}
+ for (i in 1:nrow(months_all_gridmet)){
+   gridmet<- ee$ImageCollection("IDAHO_EPSCOR/GRIDMET")$ #grabbing maximum relative temperature from GridMET
+   filterBounds(ca_counties)$ #filtering within the bay area counties
+   filterDate(months_all_gridmet$months_start[i], months_all_gridmet$months_end[i])$
+   select("tmmx")$
+   median()
+
+   temp <- gridmet$expression(
+     '(temper - 273.15) * 9/5 + 32',
+     opt_map = list(
+       'temper'= gridmet$select('tmmx')
+     )
+   )$rename('temp')
+
+    # slice iteration
+    for (j in 1:n_slice) {
+     ee_selection = data_ca_merge["ZIPCODE_5"]%>%slice((1 + (j-1)*slice_sz):(j*slice_sz))
+
+     max_temp_ca <- ee_extract(
+       x = temp,
+       y = ee_selection,
+       scale = 4000,
+       fun = ee$Reducer$mean(),
+       sf = TRUE
+     )
+
+     #create unique dataframes to later bind
+     assign(paste0("max_temp_ca_",months_all_gridmet$years[i], "-", months_all_gridmet$months[i], j, sep = ""), max_temp_ca)
+
+     #Save! Especially if you have bad wifi!!!!!!
+     saveRDS(max_temp_ca, paste0("max_temp_ca_",months_all_gridmet$years[i], "-", months_all_gridmet$months[i], "_chunk_", j, ".rds"))
+     #print for your sanity
+     print(paste0("done with chunk ", j, " of year ", i))
+    }
+
+   ee_selection = data_ca_merge["ZIPCODE_5"]%>%slice(((n_slice*slice_sz)+1):n_obsv)
+
+   max_temp_ca <- ee_extract(
+       x = temp,
+       y = ee_selection,
+       scale = 4000,
+       fun = ee$Reducer$mean(),
+       sf = TRUE
+     )
+   #create unique dataframes to later bind
+   assign(paste0("max_temp_ca_",  months_all_gridmet$years[i], "-", months_all_gridmet$months[i], (n_slice+1), sep = ""), max_temp_ca)
+
+   #Save! Especially if you have bad wifi!!!!!!
+   saveRDS(max_temp_ca, paste0("max_temp_ca_", months_all_gridmet$years[i], "-", months_all_gridmet$months[i], "_chunk_", (n_slice+1), ".rds"))
+   #print for your own sanity
+   print(paste0("done with month ", i, " for max temp for gridmet"))
+ }
+```
+# note: all data binding from this document is in data_binding.Rmd.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

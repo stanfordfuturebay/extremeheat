@@ -1,0 +1,719 @@
+---
+title: "HeatHealth_Visualizations"
+author: "Awoe"
+date: "5/27/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(sf)
+library(tigris)
+library(leaflet)
+library(sp)
+library(rgeos)
+library(dplyr)
+library(mapview)
+library(ggplot2)
+library(htmlwidgets)
+library(gapminder)
+```
+
+Load data:
+```{r Loading Data}
+# individual data frames: Health Data, Heat Data (LST, BayArea)
+HealthData_CA <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/CA_YR_ZCTAS_POP.rds")
+HeatData_CA <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/lst_ca_months.rds")
+HeatData_Bay <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/lst_bay_area_ZCTAS.rds")
+HeatDataSummer_CA <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/lst_ca_summer_months.rds")
+
+# combined data frames: 
+Heat_Health_Full <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/Heat_Health_Pop_Yearly.rds") #Bay Area Heat/Health 2004-2020
+Heat_Health_Complete <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/Heat_Health_Combined_CA.rds") #California Heat/Health 2015-2020
+```
+
+Clean data if necessary
+```{r}
+
+# Heat Data, 2015-20, all months
+TempHeat <- HeatData_Bay %>% 
+  select(!c(LST,geometry))
+
+names(TempHeat) <- sub("lst_bay_area_","",names(TempHeat))
+names(TempHeat) <- sub(".LST","",names(TempHeat))
+
+TempHeat <- TempHeat %>% 
+  #pivot_longer(cols = c(starts_with("lst_bay")),  names_to = "temp_year", values_to = "temp")
+  pivot_longer(!c(ZIPCODE_5,geometry), names_to = "temp_year", values_to = "temp")
+
+# combining data frames without population info (limited info hurts us)
+Heat_Health <- left_join(HealthData_CA %>% ungroup() %>% select(-geometry), TempHeat, by = c("ZIPCODE_5","year"="temp_year"))
+HH_Combined <- Heat_Health %>%
+  select(-population) %>%
+  na.omit()
+
+# Heat Data, 2005-2020, summer months
+TempHeatSummer <- HeatDataSummer_CA %>% 
+  select(!c(LST,geometry))
+
+names(TempHeatSummer) <- sub("lst_bay_area_","",names(TempHeatSummer))
+names(TempHeatSummer) <- sub(".LST","",names(TempHeatSummer))
+
+TempHeatSummer <- TempHeatSummer %>% 
+  #pivot_longer(cols = c(starts_with("lst_bay")),  names_to = "temp_year", values_to = "temp")
+  pivot_longer(!c(ZIPCODE_5,geometry), names_to = "temp_year", values_to = "temp")
+
+# combining data frames without population info (limited info hurts us)
+Heat_Health <- left_join(HealthData_CA %>% ungroup() %>% select(-geometry), TempHeat, by = c("ZIPCODE_5","year"="temp_year"))
+HH_Combined_Summer <- Heat_Health %>%
+  select(-population) %>%
+  na.omit()
+```
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+PLOTTING
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Plotting Hospitalizations Over Time (all CA)
+```{r}
+## Plotting total counts per zipcode per year; ideally, this would connect year to year 
+HH_Combined <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/HH_Combined_15-20_wNormPop.rds")
+
+HealthPlots_1 <- HH_Combined %>% 
+  group_by(year,ZIPCODE_5) %>% 
+  summarize(
+    avghosp = mean(norm_pop,na.rm = FALSE), 
+    sumperyear = sum(norm_pop, na.rm = FALSE),
+    minval = min(norm_pop, na.rm = FALSE),
+    maxval = max(norm_pop, na.rm = FALSE),
+    
+  )
+
+HealthPlot_1_MeanLine <- HH_Combined %>%
+  group_by(year) %>%
+  summarize(mean = mean(norm_pop)) %>%
+  ungroup()
+
+scale_colour_grey(
+  start = 0.2,
+  end = 0.8,
+  na.value = "red",
+  aesthetics = "colour"
+)
+
+ggplot(data = HealthPlots_1, aes(x=year)) +
+  geom_point(aes(y=sumperyear, color = ZIPCODE_5))  + theme_classic() + theme(legend.position = "none") + geom_line(aes(y=sumperyear,group = ZIPCODE_5, color=ZIPCODE_5)) +
+  labs(x = "Years (2015-2020)", y= "Normalized Hospitalizations per Year", title = "Normalized Hospitalizations by Population") + scale_colour_grey() + geom_line(data = HealthPlot_1_MeanLine, aes(y = mean, group = 1), size = 1.25, color = "firebrick3")
+
+#setwd("G:/My Drive/R/218Z/")
+png("health_overtime.png", width = 480, height = 480)
+ggplot(data = HealthPlots_15, aes(x=year, y=sumperyear, color = ZIPCODE_5)) +
+  geom_point()  + theme_classic() + theme(legend.position = "none") + geom_line() +
+  labs(x = "Years (2015-2020)", y= "Total Hospitalizations", title = "Total Heat-related Hospitalizations per Year ")
+dev.off()
+
+# ggplot(data = HealthPlots_1, aes(x=year, y=sumperyear)) +
+#   geom_line()
+
+
+## plotting total counts per year
+HealthPlots_2 <- HealthData_CA %>% 
+  group_by(year) %>% 
+  summarize(
+    avghosp = mean(n,na.rm = FALSE), 
+    sumperyear = sum(n, na.rm = FALSE),
+    minval = min(n, na.rm = FALSE),
+    maxval = max(n, na.rm = FALSE)
+  )
+
+ggplot(data = HealthPlots_2, aes(x=year, y=sumperyear)) +
+  geom_point() + geom_line()
+
+```
+Plotting Hospitalizations Over Time (Bay)
+```{r}
+## Plotting total counts per zipcode per year; ideally, this would connect year to year 
+HealthPlots_3 <- HealthData_Bay %>% 
+  group_by(year,ZIPCODE_5) %>% 
+  summarize(
+    avghosp = mean(n,na.rm = FALSE), 
+    sumperyear = sum(n, na.rm = FALSE),
+    minval = min(n, na.rm = FALSE),
+    maxval = max(n, na.rm = FALSE),
+    
+  )
+
+ggplot(data = HealthPlots_3, aes(x=year, y=sumperyear, color = ZIPCODE_5)) +
+  geom_point() + geom_line() + theme_classic() + theme(legend.position = "none") 
+
+# ggplot(data = HealthPlots_1, aes(x=year, y=sumperyear)) +
+#   geom_line()
+
+
+## plotting total counts per year
+HealthPlots_4 <- HealthData_Bay %>% 
+  group_by(year) %>% 
+  summarize(
+    avghosp = mean(n,na.rm = FALSE), 
+    sumperyear = sum(n, na.rm = FALSE),
+    minval = min(n, na.rm = FALSE),
+    maxval = max(n, na.rm = FALSE)
+  )
+
+ggplot(data = HealthPlots_4, aes(x=year, y=sumperyear)) +
+  geom_point() + geom_line() + theme_classic()
+
+  
+
+```
+health version of the Heat over time plot
+```{r}
+#plotting temp per year per zipcode
+HealthPlot_1 <- HealthData_CA %>% 
+  group_by(temp_year, ZIPCODE_5) %>% 
+  summarize(median_temp = median(temp))
+
+HeatPlot_1_MeanLine <- HeatPlot_1 %>%
+  group_by(temp_year) %>%
+  summarize(mean = mean(median_temp)) %>%
+  ungroup()
+
+scale_colour_grey(
+  start = 0.2,
+  end = 0.8,
+  na.value = "red",
+  aesthetics = "colour"
+)
+
+ggplot(data = HeatPlot_1, aes(x=temp_year)) +
+  geom_point(aes(y=median_temp, color = ZIPCODE_5)) + geom_line(aes(y=median_temp, group = ZIPCODE_5, color=ZIPCODE_5)) + theme_classic() + theme(legend.position = "none") + scale_colour_grey() + geom_line(data = HeatPlot_1_MeanLine, aes(y = mean, group = 1), size = 1.25, color = "firebrick3")
+```
+
+Plotting Heat over time:
+```{r}
+#plotting temp per year per zipcode
+HeatPlot_1 <- TempHeat %>% 
+  group_by(temp_year, ZIPCODE_5) %>% 
+  summarize(median_temp = median(temp))
+
+HeatPlot_1_MeanLine <- HeatPlot_1 %>%
+  group_by(temp_year) %>%
+  summarize(mean = mean(median_temp)) %>%
+  ungroup()
+
+scale_colour_grey(
+  start = 0.2,
+  end = 0.8,
+  na.value = "red",
+  aesthetics = "colour"
+)
+
+ggplot(data = HeatPlot_1, aes(x=temp_year)) +
+  geom_point(aes(y=median_temp, color = ZIPCODE_5)) + geom_line(aes(y=median_temp, group = ZIPCODE_5, color=ZIPCODE_5)) + theme_classic() + theme(legend.position = "none") + scale_colour_grey() + geom_line(data = HeatPlot_1_MeanLine, aes(y = mean, group = 1), size = 1.25, color = "firebrick3")
+```
+
+```{r}
+#plotting temp per year per zipcode, but bay area only
+HeatPlot_1c <- TempHeatSummer %>%
+  group_by(temp_year, ZIPCODE_5) %>% 
+  summarize(mean_temp = mean(temp))
+
+ggplot(data = HeatPlot_1c, aes(x=temp_year, y=mean_temp, color = ZIPCODE_5)) +
+  geom_point() + geom_line(aes(group = ZIPCODE_5)) + theme_classic() + theme(legend.position = "none")
+
+#plotting average temp per year; grouped by just Year
+HeatPlot_2 <-  TempHeat %>% 
+  group_by(temp_year) %>% 
+  summarize(mean_temp = mean(temp))
+
+ggplot(data = HeatPlot_2, aes(x = temp_year, y = mean_temp)) +
+  geom_point() + geom_line() + theme_minimal()
+# 
+# subset(year %in% c(2015:2020)
+
+HeatPlot_25 <- HeatPlot_2 %>% 
+  subset(temp_year %in% c(2015:2020))
+
+```
+
+Plotting normalized population data
+```{r}
+HH_Norm_1 <- Heat_Health_Full  %>% 
+  group_by(year, ZIPCODE_5)
+
+ggplot(data = HH_Norm_1, aes(x = year, y = norm_pop)) + 
+  geom_point() + geom_line(aes(group = ZIPCODE_5)) + theme_classic()
+
+```
+
+Plotting Heat vs Health
+```{r}
+HH_Combined <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/HH_Combined_15-20_wPop.rds")
+
+HH_Plot <- HH_Combined %>% ungroup() %>%
+  group_by(year, ZIPCODE_5) %>% 
+  summarise(n = sum(n, na.rm = TRUE), 
+            avgtemp = mean(temp)
+  )
+
+#scatter plot
+ggplot(data=HH_Plot, aes(x=avgtemp,y=n)) + 
+  geom_point(color = "darkslategray3") + labs(x = "Median Temperature", y="Total Hospitalization Count", title="Heat-Related Hospitalization by Temperature") + theme_classic() + theme(legend.position = "none") +  geom_smooth(method = "lm", color = "firebrick3") 
+#png("heat_health_nonorm.png", width = 480, height = 480)
+```
+```{r}
+HH_Combined_Norm <- readRDS("G:/Shared drives/SFBI-Restricted/PHS/HH_Combined_15-20_wNormPop.rds")
+
+HH_Plot <- HH_Combined_Norm %>% 
+  group_by(year, ZIPCODE_5) %>% 
+  summarise(norm_pop = sum(norm_pop, na.rm = TRUE), 
+            avgtemp = mean(temp)
+  ) %>% filter(avgtemp > 75)
+
+#scatter plot
+ggplot(data=HH_Plot, aes(x=avgtemp,y=(norm_pop*100000))) + 
+  geom_point(color = "darkslategray3") + labs(x = "Median Temperature", y="Normalized Hospitalization Count (per 100,000 people)", title="Normalized Heat-Related Hospitalization by Temperature") + theme_classic() + theme(legend.position = "none") +  geom_smooth(method = "lm", color = "firebrick3")
+png("heat_health_norm.png", width = 480, height = 480)
+```
+```{r}
+#setwd("G:/My Drive/R/218Z/")
+png("heat_health.png", width = 480, height = 480)
+
+ggplot(data=HH_Plot, aes(x=avgtemp,y=n)) + 
+  geom_point(color = "darkslategray3") + labs(x = "Average Temperature", y="Hospitalization Count", title="Heat-Related Hospitalization by Temperature") + theme_classic() + theme(legend.position = "none") +  geom_smooth(method = "lm", color = "firebrick3") 
+
+dev.off()
+
+mod1 <- lm(n ~ temp, data=HH_Combined)
+coef(mod1)
+
+```
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+MAPPING
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+######################
+Hospitalizations
+######################
+```{r}
+CA_ZCTAs <- HealthData_CA %>% 
+  select(ZIPCODE_5, geometry) %>% 
+  unique() %>% 
+  st_as_sf()
+
+Bay_ZCTAs <- HealthData_CA %>% 
+  filter(substr(ZIPCODE_5,1,2) %in% c("94","95")) %>% 
+  select(ZIPCODE_5, geometry,n) %>% 
+  unique() %>% 
+  st_as_sf() %>% 
+  group_by(ZIPCODE_5) %>% 
+  summarize(n=mean(n)) 
+
+# qpal <- colorQuantile("RdYlBu", Bay_ZCTAs$ZIPCODE_5, n = 4)
+# qpal <- colorNumeric(
+#   palette = "YlOrRd",
+#   domain = Bay_ZCTAs$ZIPCODE_5
+# )
+
+
+pal <- colorNumeric(
+  palette = "YlOrRd",
+  domain = Bay_ZCTAs$n
+)
+
+# mapping with leaflet
+map_CA_bay <- leaflet() %>% #remove bay and view
+  addTiles() %>% 
+  addPolygons(
+    data = Bay_ZCTAs,
+    fillColor = pal(Bay_ZCTAs$n),
+    opacity = .5,
+    fillOpacity = .5,
+    weight = .5,
+    label = ~n,
+    
+    highlightOptions = highlightOptions(
+      weight = .5,
+      opacity = 1
+    ) 
+  ) %>% 
+      setView(lat = 37.869199545202264,lng =  -122.35727798324338, zoom = 9) %>% 
+  addLegend("bottomright", pal = pal, values = Bay_ZCTAs$n,
+    title = "Hospitalizations",
+    opacity = 1
+  )
+
+map_CA_bay
+```
+######################
+Temperature, all of CA
+######################
+```{r mapping temp 2015-06}
+library(htmlwidgets)
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs" 
+
+CA_heat_ZCTAs_2015_06 <- HeatDataSummer_CA %>% 
+  select(ZIPCODE_5, geometry, lst_ca_2015_06.LST) %>% 
+  na.omit() %>%
+  st_as_sf(crs=4326)
+
+qpal <- colorNumeric(
+  palette = "YlOrRd",
+  domain = CA_heat_ZCTAs_2015_06$lst_ca_2015_06.LST
+)
+
+bins <- c(40,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125)
+pal <- colorBin("YlOrRd", domain = CA_heat_ZCTAs_2015_06$lst_ca_2015_06.LST, bins = bins)
+
+# mapping with leaflet
+map_CA_temp <- leaflet() %>% #remove bay and view
+  addTiles() %>% 
+  addPolygons(
+    data = CA_heat_ZCTAs_2015_06,
+    fillColor = pal(CA_heat_ZCTAs_2015_06$lst_ca_2015_06.LST),
+    opacity = 0,
+    fillOpacity = 0.5,
+    weight = .5,
+    label = ~lst_ca_2015_06.LST,
+    
+    highlightOptions = highlightOptions(
+      weight = .5,
+      opacity = 1
+    ) 
+  ) %>% 
+  addLegend("bottomright", pal = pal, values = CA_heat_ZCTAs_2015_06$lst_ca_2015_06.LST, title = "Max LST, July 2015",opacity = 1) %>% 
+setView(lat = 36.7783,lng =  -119.4179, zoom = 6) 
+    
+#map_CA_temp
+# qpal <- colorQuantile("RdYlBu", Bay_ZCTAs$ZIPCODE_5, n = 4)
+saveWidget(map_CA_temp,file="map_CA_15-6.html")
+
+```
+```{r mapping temp 2017-06}
+library(htmlwidgets)
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs" 
+
+CA_heat_ZCTAs_2017_06 <- HeatDataSummer_CA %>% 
+  select(ZIPCODE_5, geometry, lst_ca_2017_06.LST) %>% 
+  na.omit() %>%
+  st_as_sf(crs=4326)
+
+qpal <- colorNumeric(
+  palette = "YlOrRd",
+  domain = CA_heat_ZCTAs_2017_06$lst_ca_2017_06.LST
+)
+
+bins <- c(40,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125)
+pal <- colorBin("YlOrRd", domain = CA_heat_ZCTAs_2017_06$lst_ca_2017_06.LST, bins = bins)
+
+# mapping with leaflet
+map_CA_temp <- leaflet() %>% #remove bay and view
+  addTiles() %>% 
+  addPolygons(
+    data = CA_heat_ZCTAs_2017_06,
+    fillColor = pal(CA_heat_ZCTAs_2017_06$lst_ca_2017_06.LST),
+    opacity = 0,
+    fillOpacity = 0.5,
+    weight = .5,
+    label = ~lst_ca_2017_06.LST,
+    
+    highlightOptions = highlightOptions(
+      weight = .5,
+      opacity = 1
+    ) 
+  ) %>% 
+  addLegend("bottomright", pal = pal, values = CA_heat_ZCTAs_2017_06$lst_ca_2017_06.LST, title = "Max LST, July 2017",opacity = 1) %>% 
+setView(lat = 36.7783,lng =  -119.4179, zoom = 6) 
+    
+#map_CA_temp
+# qpal <- colorQuantile("RdYlBu", Bay_ZCTAs$ZIPCODE_5, n = 4)
+saveWidget(map_CA_temp,file="map_CA_17-6.html")
+
+```
+```{r mapping temp 2020-06}
+library(htmlwidgets)
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs" 
+
+CA_heat_ZCTAs_2020_06 <- HeatDataSummer_CA %>% 
+  select(ZIPCODE_5, geometry, lst_ca_2020_06.LST) %>% 
+  na.omit() %>%
+  st_as_sf(crs=4326)
+
+qpal <- colorNumeric(
+  palette = "YlOrRd",
+  domain = CA_heat_ZCTAs_2015_06$lst_ca_2020_06.LST
+)
+
+bins <- c(40,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125)
+pal <- colorBin("YlOrRd", domain = CA_heat_ZCTAs_2020_06$lst_ca_2020_06.LST, bins = bins)
+
+# mapping with leaflet
+map_CA_temp <- leaflet() %>% #remove bay and view
+  addTiles() %>% 
+  addPolygons(
+    data = CA_heat_ZCTAs_2020_06,
+    fillColor = pal(CA_heat_ZCTAs_2020_06$lst_ca_2020_06.LST),
+    opacity = 0,
+    fillOpacity = 0.5,
+    weight = .5,
+    label = ~lst_ca_2020_06.LST,
+    highlightOptions = highlightOptions(
+      weight = .5,
+      opacity = 1
+    ) 
+  ) %>% 
+  addLegend("bottomright", pal = pal, values = CA_heat_ZCTAs_2020_06$lst_ca_2020_06.LST, title = "Max LST, July 2020",opacity = 1) %>% 
+setView(lat = 36.7783,lng =  -119.4179, zoom = 6) 
+    
+#map_CA_temp
+# qpal <- colorQuantile("RdYlBu", Bay_ZCTAs$ZIPCODE_5, n = 4)
+saveWidget(map_CA_temp,file="map_CA_20-6.html")
+
+```
+```{r mapping temp 2010-06}
+library(htmlwidgets)
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs" 
+
+CA_heat_ZCTAs_2010_06 <- HeatDataSummer_CA %>% 
+  select(ZIPCODE_5, geometry, lst_ca_2010_06.LST) %>% 
+  na.omit() %>%
+  st_as_sf(crs=4326)
+
+qpal <- colorNumeric(
+  palette = "YlOrRd",
+  domain = CA_heat_ZCTAs_2010_06$lst_ca_2010_06.LST
+)
+
+bins <- c(40,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125)
+pal <- colorBin("YlOrRd", domain = CA_heat_ZCTAs_2010_06$lst_ca_2010_06.LST, bins = bins)
+
+# mapping with leaflet
+map_CA_temp <- leaflet() %>% #remove bay and view
+  addTiles() %>% 
+  addPolygons(
+    data = CA_heat_ZCTAs_2010_06,
+    fillColor = pal(CA_heat_ZCTAs_2010_06$lst_ca_2010_06.LST),
+    opacity = 0,
+    fillOpacity = 0.5,
+    weight = .5,
+    label = ~lst_ca_2010_06.LST,
+    highlightOptions = highlightOptions(
+      weight = .5,
+      opacity = 1
+    ) 
+  ) %>% 
+  addLegend("bottomright", pal = pal, values = CA_heat_ZCTAs_2010_06$lst_ca_2010_06.LST, title = "Max LST, July 2010",opacity = 1) %>% 
+setView(lat = 36.7783,lng =  -119.4179, zoom = 6) 
+    
+#map_CA_temp
+# qpal <- colorQuantile("RdYlBu", Bay_ZCTAs$ZIPCODE_5, n = 4)
+saveWidget(map_CA_temp,file="map_CA_10-6.html")
+
+```
+```{r mapping temp 2005-06}
+library(htmlwidgets)
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs" 
+
+CA_heat_ZCTAs_2005_06 <- HeatDataSummer_CA %>% 
+  select(ZIPCODE_5, geometry, lst_ca_2005_06.LST) %>% 
+  na.omit() %>%
+  st_as_sf(crs=4326)
+
+qpal <- colorNumeric(
+  palette = "YlOrRd",
+  domain = CA_heat_ZCTAs_2010_06$lst_ca_2005_06.LST
+)
+
+bins <- c(40,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125)
+pal <- colorBin("YlOrRd", domain = CA_heat_ZCTAs_2005_06$lst_ca_2005_06.LST, bins = bins)
+
+# mapping with leaflet
+map_CA_temp <- leaflet() %>% #remove bay and view
+  addTiles() %>% 
+  addPolygons(
+    data = CA_heat_ZCTAs_2005_06,
+    fillColor = pal(CA_heat_ZCTAs_2005_06$lst_ca_2005_06.LST),
+    opacity = 0,
+    fillOpacity = 0.5,
+    weight = .5,
+    label = ~lst_ca_2005_06.LST,
+    highlightOptions = highlightOptions(
+      weight = .5,
+      opacity = 1
+    ) 
+  ) %>% 
+  addLegend("bottomright", pal = pal, values = CA_heat_ZCTAs_2005_06$lst_ca_2005_06.LST, title = "Max LST, July 2005",opacity = 1) %>% 
+setView(lat = 36.7783,lng =  -119.4179, zoom = 6) 
+    
+#map_CA_temp
+# qpal <- colorQuantile("RdYlBu", Bay_ZCTAs$ZIPCODE_5, n = 4)
+saveWidget(map_CA_temp,file="map_CA_05-6.html")
+
+```
+######################
+Temperature, Fair Oaks
+######################
+```{r mapping temp 2015-06}
+library(htmlwidgets)
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs" 
+
+CA_heat_ZCTAs_2015_06 <- HeatDataSummer_CA %>% 
+  select(ZIPCODE_5, geometry, lst_ca_2015_06.LST) %>% 
+  na.omit() %>%
+  st_as_sf(crs=4326)
+
+qpal <- colorNumeric(
+  palette = "YlOrRd",
+  domain = CA_heat_ZCTAs_2015_06$lst_ca_2015_06.LST
+)
+
+bins <- c(40,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125)
+pal <- colorBin("YlOrRd", domain = CA_heat_ZCTAs_2015_06$lst_ca_2015_06.LST, bins = bins)
+
+# mapping with leaflet
+map_CA_temp <- leaflet() %>% #remove bay and view
+  addTiles() %>% 
+  addPolygons(
+    data = CA_heat_ZCTAs_2015_06,
+    fillColor = pal(CA_heat_ZCTAs_2015_06$lst_ca_2015_06.LST),
+    opacity = 0,
+    fillOpacity = 0.5,
+    weight = .5,
+    label = ~lst_ca_2015_06.LST,
+    
+    highlightOptions = highlightOptions(
+      weight = .5,
+      opacity = 1
+    ) 
+  ) %>% 
+  addLegend("bottomright", pal = pal, values = CA_heat_ZCTAs_2015_06$lst_ca_2015_06.LST, title = "Max LST, July 2015",opacity = 1) %>% 
+setView(lat = 37.4744,lng =  -122.1966, zoom = 12) 
+    
+#map_CA_temp
+# qpal <- colorQuantile("RdYlBu", Bay_ZCTAs$ZIPCODE_5, n = 4)
+saveWidget(map_CA_temp,file="map_fairoak_15-6.html")
+
+```
+```{r mapping temp 2020-06}
+library(htmlwidgets)
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs" 
+
+CA_heat_ZCTAs_2020_06 <- HeatDataSummer_CA %>% 
+  select(ZIPCODE_5, geometry, lst_ca_2020_06.LST) %>% 
+  na.omit() %>%
+  st_as_sf(crs=4326)
+
+qpal <- colorNumeric(
+  palette = "YlOrRd",
+  domain = CA_heat_ZCTAs_2015_06$lst_ca_2020_06.LST
+)
+
+bins <- c(40,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125)
+pal <- colorBin("YlOrRd", domain = CA_heat_ZCTAs_2020_06$lst_ca_2020_06.LST, bins = bins)
+
+# mapping with leaflet
+map_CA_temp <- leaflet() %>% #remove bay and view
+  addTiles() %>% 
+  addPolygons(
+    data = CA_heat_ZCTAs_2020_06,
+    fillColor = pal(CA_heat_ZCTAs_2020_06$lst_ca_2020_06.LST),
+    opacity = 0,
+    fillOpacity = 0.5,
+    weight = .5,
+    label = ~lst_ca_2020_06.LST,
+    highlightOptions = highlightOptions(
+      weight = .5,
+      opacity = 1
+    ) 
+  ) %>% 
+  addLegend("bottomright", pal = pal, values = CA_heat_ZCTAs_2020_06$lst_ca_2020_06.LST, title = "Max LST, July 2020",opacity = 1) %>% 
+setView(lat = 37.4744,lng =  -122.1966, zoom = 12) 
+    
+#map_CA_temp
+# qpal <- colorQuantile("RdYlBu", Bay_ZCTAs$ZIPCODE_5, n = 4)
+saveWidget(map_CA_temp,file="map_fairoak_20-6.html")
+
+```
+```{r mapping temp 2010-06}
+library(htmlwidgets)
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs" 
+
+CA_heat_ZCTAs_2010_06 <- HeatDataSummer_CA %>% 
+  select(ZIPCODE_5, geometry, lst_ca_2010_06.LST) %>% 
+  na.omit() %>%
+  st_as_sf(crs=4326)
+
+qpal <- colorNumeric(
+  palette = "YlOrRd",
+  domain = CA_heat_ZCTAs_2010_06$lst_ca_2010_06.LST
+)
+
+bins <- c(40,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125)
+pal <- colorBin("YlOrRd", domain = CA_heat_ZCTAs_2010_06$lst_ca_2010_06.LST, bins = bins)
+
+# mapping with leaflet
+map_CA_temp <- leaflet() %>% #remove bay and view
+  addTiles() %>% 
+  addPolygons(
+    data = CA_heat_ZCTAs_2010_06,
+    fillColor = pal(CA_heat_ZCTAs_2010_06$lst_ca_2010_06.LST),
+    opacity = 0,
+    fillOpacity = 0.5,
+    weight = .5,
+    label = ~lst_ca_2010_06.LST,
+    highlightOptions = highlightOptions(
+      weight = .5,
+      opacity = 1
+    ) 
+  ) %>% 
+  addLegend("bottomright", pal = pal, values = CA_heat_ZCTAs_2010_06$lst_ca_2010_06.LST, title = "Max LST, July 2010",opacity = 1) %>% 
+setView(lat = 37.4744,lng =  -122.1966, zoom = 12) 
+    
+#map_CA_temp
+# qpal <- colorQuantile("RdYlBu", Bay_ZCTAs$ZIPCODE_5, n = 4)
+saveWidget(map_CA_temp,file="map_fairoak_10-6.html")
+
+```
+```{r mapping temp 2005-06}
+library(htmlwidgets)
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs" 
+
+CA_heat_ZCTAs_2005_06 <- HeatDataSummer_CA %>% 
+  select(ZIPCODE_5, geometry, lst_ca_2005_06.LST) %>% 
+  na.omit() %>%
+  st_as_sf(crs=4326)
+
+qpal <- colorNumeric(
+  palette = "YlOrRd",
+  domain = CA_heat_ZCTAs_2010_06$lst_ca_2005_06.LST
+)
+
+bins <- c(40,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125)
+pal <- colorBin("YlOrRd", domain = CA_heat_ZCTAs_2005_06$lst_ca_2005_06.LST, bins = bins)
+
+# mapping with leaflet
+map_CA_temp <- leaflet() %>% #remove bay and view
+  addTiles() %>% 
+  addPolygons(
+    data = CA_heat_ZCTAs_2005_06,
+    fillColor = pal(CA_heat_ZCTAs_2005_06$lst_ca_2005_06.LST),
+    opacity = 0,
+    fillOpacity = 0.5,
+    weight = .5,
+    label = ~lst_ca_2005_06.LST,
+    highlightOptions = highlightOptions(
+      weight = .5,
+      opacity = 1
+    ) 
+  ) %>% 
+  addLegend("bottomright", pal = pal, values = CA_heat_ZCTAs_2005_06$lst_ca_2005_06.LST, title = "Max LST, July 2005",opacity = 1) %>% 
+setView(lat = 37.4744,lng =  -122.1966, zoom = 12) 
+    
+#map_CA_temp
+# qpal <- colorQuantile("RdYlBu", Bay_ZCTAs$ZIPCODE_5, n = 4)
+saveWidget(map_CA_temp,file="map_fairoak_05-6.html")
+
+```

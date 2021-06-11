@@ -1,0 +1,568 @@
+---
+title: "data_binding"
+author: "Maggie Ford"
+date: "5/23/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r sample_rbind, echo=FALSE}
+library(exactextractr)
+library(raster)
+library(sf)
+library(tidyverse)
+library(dplyr)
+library(tigris)
+library(leaflet)
+library(sp)
+library(rgeos)
+library(geojsonio)
+library(googledrive)
+library(stars)
+```
+
+```{r}
+# change this to whatever your working directory was when running rgee_CA.rmd
+cd = "C:/Users/maggi/Documents/Github/trees/Health_Impact/"
+```
+
+all of the following rbind chunks are meant to bind the sliced dataframes made in rgee_CA into a singular dataframe with columns labeled by year. code to clean up the dataframes and add columns by year is then included in HeatnHealth.Rmd. if you change the formatting of the saved .rds files in rgee_CA, then the names will need to be changed in this file as well in order to execute. same goes for changing the slice size in rgee_CA - slice size determines the amount of rbind operations necessary, and time resolution (n months, n years, over what time frame) determines the amount of cbind operations necessary.
+
+this rbinding is necessary because rgee_CA can only process so many zip codes at a time when using ee_extract.
+```{r rbind_lst_bay}
+cd = "C:/Users/maggi/Documents/Github/trees/Health_Impact/"
+var = "lst_bay_area_"
+
+for (y in 2015:2020) {
+  for (m in 1:12){
+
+    current = readRDS(paste0(cd, var, y, "_", m, ".rds"))
+
+    assign(paste0(var, y, "_", m), current)
+    print(paste0("done with lst bay ", y, " ", m))
+  }
+}
+
+```
+
+```{r rbind_max_temp_ca}
+cd = "C:/Users/maggi/Documents/Github/trees/Health_Impact/"
+var = "max_temp_ca_"
+
+max_temp_ca = data.frame(ZIPCODE_5=character(),
+                 temp=numeric(), 
+                 geometry=list(), 
+                 stringsAsFactors=FALSE) 
+
+for (y in 2015:2020) {
+  for (m in 1:12){
+    rbind_obj = data.frame(ZIPCODE_5=character(),
+                 temp=numeric(), 
+                 geometry=list(), 
+                 stringsAsFactors=FALSE) 
+    for (c in 1:7) {
+      #rbind all like chunks together
+      current = readRDS(paste0(cd, var, y, "-", m, "_chunk_", c, ".rds"))
+      rbind_obj <- rbind_obj %>%
+        rbind(current)
+    }
+    assign(paste0(var, y, "_", m), rbind_obj)
+    print(paste0("done with max_temp ", y, " ", m))
+  }
+}
+```
+
+```{r rbind_ndvi_ca}
+cd = "C:/Users/maggi/Documents/Github/trees/Health_Impact/"
+var = "ndvi_ca_"
+
+for (y in 2015:2020) {
+  for (m in 1:12){
+    rbind_obj = data.frame(ZIPCODE_5=character(),
+                 ndvi=numeric(), 
+                 geometry=list(), 
+                 stringsAsFactors=FALSE) 
+    for (c in 1:7) {
+      #rbind all like chunks together
+      current = readRDS(paste0(cd, var, y, "-", m, "_chunk_", c, ".rds"))
+      rbind_obj <- rbind_obj %>%
+        rbind(current)
+    }
+    assign(paste0(var, y, "_", m), rbind_obj)
+    print(paste0("done with ndvi ", y, " ", m))
+  }
+}
+```
+
+```{r rbind_lst_ca}
+cd = "C:/Users/maggi/Documents/Github/trees/Health_Impact/"
+var = "lst_ca_"
+
+for (y in 2015:2020) {
+  for (m in 1:12){
+    if ((m == 6) && (y == 2019)) {
+      next   
+    } else {
+    rbind_obj = data.frame(ZIPCODE_5=character(),
+                 LST=numeric(), 
+                 geometry=list(), 
+                 stringsAsFactors=FALSE) 
+    for (c in 1:7) {
+      #rbind all like chunks together
+      current = readRDS(paste0(cd, var, y, "-", m, "_chunk_", c, ".rds"))
+      rbind_obj <- rbind_obj %>%
+        rbind(current)
+    }
+    # need to add a 0 in front of the month number if month is single-digit
+    if (m > 9) {
+      assign(paste0(var, y, "_", m), rbind_obj)
+    } else {
+      assign(paste0(var, y, "_0", m), rbind_obj)
+    }
+    print(paste0("done with lst ", y, " ", m))
+    }
+  }
+}
+```
+
+these rbind chunks were made specifically to create the summer month lst dataset from 2004-2020.
+```{r rbind_lst_ca_summer}
+cd = "C:/Users/maggi/Documents/Github/trees/Health_Impact/"
+var = "lst_ca_"
+
+# this code rounds up the saved chunks from Landsat7 (100 entries each, 14 chunks a month)
+for (y in 2005:2014) {
+  for (m in 5:8){
+    if ((m == 6) && (y == 2009)) {
+      next   
+    } else {
+    rbind_obj = data.frame(ZIPCODE_5=character(),
+                 LST=numeric(), 
+                 geometry=list(), 
+                 stringsAsFactors=FALSE) 
+    for (c in 1:14) {
+      #rbind all like chunks together
+      current = readRDS(paste0(cd, var, y, "-", m, "_chunk_", c, ".rds"))
+      rbind_obj <- rbind_obj %>%
+        rbind(current)
+    }
+    # need to add a 0 in front of the month number if month is single-digit
+    if (m > 9) {
+      assign(paste0(var, y, "_", m), rbind_obj)
+    } else {
+      assign(paste0(var, y, "_0", m), rbind_obj)
+    }
+    print(paste0("done with lst ", y, " ", m))
+    }
+  }
+}
+
+# this code rounds up the saved chunks from Landsat8 (200 entries each, 7 chunks a month)
+for (y in 2014:2020) {
+  for (m in 5:8){
+    if ((m == 6) && (y == 2019)) {
+      next   
+    } else {
+    rbind_obj = data.frame(ZIPCODE_5=character(),
+                 LST=numeric(), 
+                 geometry=list(), 
+                 stringsAsFactors=FALSE) 
+    for (c in 1:7) {
+      #rbind all like chunks together
+      current = readRDS(paste0(cd, var, y, "-", m, "_chunk_", c, ".rds"))
+      rbind_obj <- rbind_obj %>%
+        rbind(current)
+    }
+    # need to add a 0 in front of the month number if month is single-digit
+    if (m > 9) {
+      assign(paste0(var, y, "_", m), rbind_obj)
+    } else {
+      assign(paste0(var, y, "_0", m), rbind_obj)
+    }
+    print(paste0("done with lst ", y, " ", m))
+    }
+  }
+}
+```
+
+each of the following cbind chunks gathers the rbinded dataframes and creates labeled columns out of them in one large dataset.
+```{r cbind_lst_bay}
+lst_bay_area_months <- lst_bay_area_2015_1 %>%
+  cbind(lst_bay_area_2015_2$LST,
+        lst_bay_area_2015_3$LST,
+        lst_bay_area_2015_4$LST,
+        lst_bay_area_2015_5$LST,
+        lst_bay_area_2015_6$LST,
+        lst_bay_area_2015_7$LST,
+        lst_bay_area_2015_8$LST,
+        lst_bay_area_2015_9$LST,
+        lst_bay_area_2015_10$LST,
+        lst_bay_area_2015_11$LST,
+        lst_bay_area_2015_12$LST,
+        lst_bay_area_2016_1$LST,
+        lst_bay_area_2016_2$LST,
+        lst_bay_area_2016_3$LST,
+        lst_bay_area_2016_4$LST,
+        lst_bay_area_2016_5$LST,
+        lst_bay_area_2016_6$LST,
+        lst_bay_area_2016_7$LST,
+        lst_bay_area_2016_8$LST,
+        lst_bay_area_2016_9$LST,
+        lst_bay_area_2016_10$LST,
+        lst_bay_area_2016_11$LST,
+        lst_bay_area_2016_12$LST,
+        lst_bay_area_2017_1$LST,
+        lst_bay_area_2017_2$LST,
+        lst_bay_area_2017_3$LST,
+        lst_bay_area_2017_4$LST,
+        lst_bay_area_2017_5$LST,
+        lst_bay_area_2017_6$LST,
+        lst_bay_area_2017_7$LST,
+        lst_bay_area_2017_8$LST,
+        lst_bay_area_2017_9$LST,
+        lst_bay_area_2017_10$LST,
+        lst_bay_area_2017_11$LST,
+        lst_bay_area_2017_12$LST,
+        lst_bay_area_2018_1$LST,
+        lst_bay_area_2018_2$LST,
+        lst_bay_area_2018_3$LST,
+        lst_bay_area_2018_4$LST,
+        lst_bay_area_2018_5$LST,
+        lst_bay_area_2018_6$LST,
+        lst_bay_area_2018_7$LST,
+        lst_bay_area_2018_8$LST,
+        lst_bay_area_2018_9$LST,
+        lst_bay_area_2018_10$LST,
+        lst_bay_area_2018_11$LST,
+        lst_bay_area_2018_12$LST,
+        lst_bay_area_2019_1$LST,
+        lst_bay_area_2019_2$LST,
+        lst_bay_area_2019_3$LST,
+        lst_bay_area_2019_4$LST,
+        lst_bay_area_2019_5$LST,
+        lst_bay_area_2019_6$LST,
+        lst_bay_area_2019_7$LST,
+        lst_bay_area_2019_8$LST,
+        lst_bay_area_2019_9$LST,
+        lst_bay_area_2019_10$LST,
+        lst_bay_area_2019_11$LST,
+        lst_bay_area_2019_12$LST,
+        lst_bay_area_2020_1$LST,
+        lst_bay_area_2020_2$LST,
+        lst_bay_area_2020_3$LST,
+        lst_bay_area_2020_4$LST,
+        lst_bay_area_2020_5$LST,
+        lst_bay_area_2020_6$LST,
+        lst_bay_area_2020_7$LST,
+        lst_bay_area_2020_8$LST,
+        lst_bay_area_2020_9$LST,
+        lst_bay_area_2020_10$LST,
+        lst_bay_area_2020_11$LST,
+        lst_bay_area_2020_12$LST)
+
+saveRDS(lst_bay_area_months, "lst_bay_area_months.rds")
+
+```
+
+```{r cbind_max_temp_ca}
+max_temp_ca_months <- max_temp_ca_2015_01 %>%
+  cbind(max_temp_ca_2015_02$temp,
+        max_temp_ca_2015_03$temp,
+        max_temp_ca_2015_04$temp,
+        max_temp_ca_2015_05$temp,
+        max_temp_ca_2015_06$temp,
+        max_temp_ca_2015_07$temp,
+        max_temp_ca_2015_08$temp,
+        max_temp_ca_2015_09$temp,
+        max_temp_ca_2015_10$temp,
+        max_temp_ca_2015_11$temp,
+        max_temp_ca_2015_12$temp,
+        max_temp_ca_2016_01$temp,
+        max_temp_ca_2016_02$temp,
+        max_temp_ca_2016_03$temp,
+        max_temp_ca_2016_04$temp,
+        max_temp_ca_2016_05$temp,
+        max_temp_ca_2016_06$temp,
+        max_temp_ca_2016_07$temp,
+        max_temp_ca_2016_08$temp,
+        max_temp_ca_2016_09$temp,
+        max_temp_ca_2016_10$temp,
+        max_temp_ca_2016_11$temp,
+        max_temp_ca_2016_12$temp,
+        max_temp_ca_2017_01$temp,
+        max_temp_ca_2017_02$temp,
+        max_temp_ca_2017_03$temp,
+        max_temp_ca_2017_04$temp,
+        max_temp_ca_2017_05$temp,
+        max_temp_ca_2017_06$temp,
+        max_temp_ca_2017_07$temp,
+        max_temp_ca_2017_08$temp,
+        max_temp_ca_2017_09$temp,
+        max_temp_ca_2017_10$temp,
+        max_temp_ca_2017_11$temp,
+        max_temp_ca_2017_12$temp,
+        max_temp_ca_2018_01$temp,
+        max_temp_ca_2018_02$temp,
+        max_temp_ca_2018_03$temp,
+        max_temp_ca_2018_04$temp,
+        max_temp_ca_2018_05$temp,
+        max_temp_ca_2018_06$temp,
+        max_temp_ca_2018_07$temp,
+        max_temp_ca_2018_08$temp,
+        max_temp_ca_2018_09$temp,
+        max_temp_ca_2018_10$temp,
+        max_temp_ca_2018_11$temp,
+        max_temp_ca_2018_12$temp,
+        max_temp_ca_2019_01$temp,
+        max_temp_ca_2019_02$temp,
+        max_temp_ca_2019_03$temp,
+        max_temp_ca_2019_04$temp,
+        max_temp_ca_2019_05$temp,
+        max_temp_ca_2019_06$temp,
+        max_temp_ca_2019_07$temp,
+        max_temp_ca_2019_08$temp,
+        max_temp_ca_2019_09$temp,
+        max_temp_ca_2019_10$temp,
+        max_temp_ca_2019_11$temp,
+        max_temp_ca_2019_12$temp,
+        max_temp_ca_2020_01$temp,
+        max_temp_ca_2020_02$temp,
+        max_temp_ca_2020_03$temp,
+        max_temp_ca_2020_04$temp,
+        max_temp_ca_2020_05$temp,
+        max_temp_ca_2020_06$temp,
+        max_temp_ca_2020_07$temp,
+        max_temp_ca_2020_08$temp,
+        max_temp_ca_2020_09$temp,
+        max_temp_ca_2020_10$temp,
+        max_temp_ca_2020_11$temp,
+        max_temp_ca_2020_12$temp)
+
+saveRDS(max_temp_ca_months, "max_temp_ca_months.rds")
+```
+
+```{r cbind_ndvi_ca}
+ndvi_ca_months <- ndvi_ca_2015_01 %>%
+  cbind(ndvi_ca_2015_02$ndvi,
+        ndvi_ca_2015_03$ndvi,
+        ndvi_ca_2015_04$ndvi,
+        ndvi_ca_2015_05$ndvi,
+        ndvi_ca_2015_06$ndvi,
+        ndvi_ca_2015_07$ndvi,
+        ndvi_ca_2015_08$ndvi,
+        ndvi_ca_2015_09$ndvi,
+        ndvi_ca_2015_10$ndvi,
+        ndvi_ca_2015_11$ndvi,
+        ndvi_ca_2015_12$ndvi,
+        ndvi_ca_2016_01$ndvi,
+        ndvi_ca_2016_02$ndvi,
+        ndvi_ca_2016_03$ndvi,
+        ndvi_ca_2016_04$ndvi,
+        ndvi_ca_2016_05$ndvi,
+        ndvi_ca_2016_06$ndvi,
+        ndvi_ca_2016_07$ndvi,
+        ndvi_ca_2016_08$ndvi,
+        ndvi_ca_2016_09$ndvi,
+        ndvi_ca_2016_10$ndvi,
+        ndvi_ca_2016_11$ndvi,
+        ndvi_ca_2016_12$ndvi,
+        ndvi_ca_2017_01$ndvi,
+        ndvi_ca_2017_02$ndvi,
+        ndvi_ca_2017_03$ndvi,
+        ndvi_ca_2017_04$ndvi,
+        ndvi_ca_2017_05$ndvi,
+        ndvi_ca_2017_06$ndvi,
+        ndvi_ca_2017_07$ndvi,
+        ndvi_ca_2017_08$ndvi,
+        ndvi_ca_2017_09$ndvi,
+        ndvi_ca_2017_10$ndvi,
+        ndvi_ca_2017_11$ndvi,
+        ndvi_ca_2017_12$ndvi,
+        ndvi_ca_2018_01$ndvi,
+        ndvi_ca_2018_02$ndvi,
+        ndvi_ca_2018_03$ndvi,
+        ndvi_ca_2018_04$ndvi,
+        ndvi_ca_2018_05$ndvi,
+        ndvi_ca_2018_06$ndvi,
+        ndvi_ca_2018_07$ndvi,
+        ndvi_ca_2018_08$ndvi,
+        ndvi_ca_2018_09$ndvi,
+        ndvi_ca_2018_10$ndvi,
+        ndvi_ca_2018_11$ndvi,
+        ndvi_ca_2018_12$ndvi,
+        ndvi_ca_2019_01$ndvi,
+        ndvi_ca_2019_02$ndvi,
+        ndvi_ca_2019_03$ndvi,
+        ndvi_ca_2019_04$ndvi,
+        ndvi_ca_2019_05$ndvi,
+        ndvi_ca_2019_06$ndvi,
+        ndvi_ca_2019_07$ndvi,
+        ndvi_ca_2019_08$ndvi,
+        ndvi_ca_2019_09$ndvi,
+        ndvi_ca_2019_10$ndvi,
+        ndvi_ca_2019_11$ndvi,
+        ndvi_ca_2019_12$ndvi,
+        ndvi_ca_2020_01$ndvi,
+        ndvi_ca_2020_02$ndvi,
+        ndvi_ca_2020_03$ndvi,
+        ndvi_ca_2020_04$ndvi,
+        ndvi_ca_2020_05$ndvi,
+        ndvi_ca_2020_06$ndvi,
+        ndvi_ca_2020_07$ndvi,
+        ndvi_ca_2020_08$ndvi,
+        ndvi_ca_2020_09$ndvi,
+        ndvi_ca_2020_10$ndvi,
+        ndvi_ca_2020_11$ndvi,
+        ndvi_ca_2020_12$ndvi)
+
+saveRDS(ndvi_ca_months, "ndvi_ca_months.rds")
+```
+
+```{r cbind_lst_ca}
+ lst_ca_months <- lst_ca_2015_01 %>%
+  cbind(lst_ca_2015_02$LST,
+        lst_ca_2015_03$LST,
+        lst_ca_2015_04$LST,
+        lst_ca_2015_05$LST,
+        lst_ca_2015_06$LST,
+        lst_ca_2015_07$LST,
+        lst_ca_2015_08$LST,
+        lst_ca_2015_09$LST,
+        lst_ca_2015_10$LST,
+        lst_ca_2015_11$LST,
+        lst_ca_2015_12$LST,
+        lst_ca_2016_01$LST,
+        lst_ca_2016_02$LST,
+        lst_ca_2016_03$LST,
+        lst_ca_2016_04$LST,
+        lst_ca_2016_05$LST,
+        lst_ca_2016_06$LST,
+        lst_ca_2016_07$LST,
+        lst_ca_2016_08$LST,
+        lst_ca_2016_09$LST,
+        lst_ca_2016_10$LST,
+        lst_ca_2016_11$LST,
+        lst_ca_2016_12$LST,
+        lst_ca_2017_01$LST,
+        lst_ca_2017_02$LST,
+        lst_ca_2017_03$LST,
+        lst_ca_2017_04$LST,
+        lst_ca_2017_05$LST,
+        lst_ca_2017_06$LST,
+        lst_ca_2017_07$LST,
+        lst_ca_2017_08$LST,
+        lst_ca_2017_09$LST,
+        lst_ca_2017_10$LST,
+        lst_ca_2017_11$LST,
+        lst_ca_2017_12$LST,
+        lst_ca_2018_01$LST,
+        lst_ca_2018_02$LST,
+        lst_ca_2018_03$LST,
+        lst_ca_2018_04$LST,
+        lst_ca_2018_05$LST,
+        lst_ca_2018_06$LST,
+        lst_ca_2018_07$LST,
+        lst_ca_2018_08$LST,
+        lst_ca_2018_09$LST,
+        lst_ca_2018_10$LST,
+        lst_ca_2018_11$LST,
+        lst_ca_2018_12$LST,
+        lst_ca_2019_01$LST,
+        lst_ca_2019_02$LST,
+        lst_ca_2019_03$LST,
+        lst_ca_2019_04$LST,
+        lst_ca_2019_05$LST,
+        #lst_ca_2019_06$LST,
+        lst_ca_2019_07$LST,
+        lst_ca_2019_08$LST,
+        lst_ca_2019_09$LST,
+        lst_ca_2019_10$LST,
+        lst_ca_2019_11$LST,
+        lst_ca_2019_12$LST,
+        lst_ca_2020_01$LST,
+        lst_ca_2020_02$LST,
+        lst_ca_2020_03$LST,
+        lst_ca_2020_04$LST,
+        lst_ca_2020_05$LST,
+        lst_ca_2020_06$LST,
+        lst_ca_2020_07$LST,
+        lst_ca_2020_08$LST,
+        lst_ca_2020_09$LST,
+        lst_ca_2020_10$LST,
+        lst_ca_2020_11$LST,
+        lst_ca_2020_12$LST)
+
+saveRDS(lst_ca_months, "lst_ca_months.rds")
+```
+```{r cbind_lst_ca}
+ lst_ca_summer_months <- lst_ca_2005_05 %>%
+  cbind(lst_ca_2005_05$LST,
+        lst_ca_2005_06$LST,
+        lst_ca_2005_07$LST,
+        lst_ca_2005_08$LST,
+        lst_ca_2006_05$LST,
+        lst_ca_2006_06$LST,
+        lst_ca_2006_07$LST,
+        lst_ca_2006_08$LST,
+        lst_ca_2007_05$LST,
+        lst_ca_2007_06$LST,
+        lst_ca_2007_07$LST,
+        lst_ca_2007_08$LST,
+        lst_ca_2008_05$LST,
+        lst_ca_2008_06$LST,
+        lst_ca_2008_07$LST,
+        lst_ca_2008_08$LST,
+        lst_ca_2009_05$LST,
+        #lst_ca_2009_06$LST,
+        lst_ca_2009_07$LST,
+        lst_ca_2009_08$LST,
+        lst_ca_2010_05$LST,
+        lst_ca_2010_06$LST,
+        lst_ca_2010_07$LST,
+        lst_ca_2010_08$LST,
+        lst_ca_2011_05$LST,
+        lst_ca_2011_06$LST,
+        lst_ca_2011_07$LST,
+        lst_ca_2011_08$LST,
+        lst_ca_2012_05$LST,
+        lst_ca_2012_06$LST,
+        lst_ca_2012_07$LST,
+        lst_ca_2012_08$LST,
+        lst_ca_2013_05$LST,
+        lst_ca_2013_06$LST,
+        lst_ca_2013_07$LST,
+        lst_ca_2013_08$LST,
+        lst_ca_2014_05$LST,
+        lst_ca_2014_06$LST,
+        lst_ca_2014_07$LST,
+        lst_ca_2014_08$LST,
+        lst_ca_2015_05$LST,
+        lst_ca_2015_06$LST,
+        lst_ca_2015_07$LST,
+        lst_ca_2015_08$LST,
+        lst_ca_2016_05$LST,
+        lst_ca_2016_06$LST,
+        lst_ca_2016_07$LST,
+        lst_ca_2016_08$LST,
+        lst_ca_2017_05$LST,
+        lst_ca_2017_06$LST,
+        lst_ca_2017_07$LST,
+        lst_ca_2017_08$LST,
+        lst_ca_2018_05$LST,
+        lst_ca_2018_06$LST,
+        lst_ca_2018_07$LST,
+        lst_ca_2018_08$LST,
+        lst_ca_2019_05$LST,
+        #lst_ca_2019_06$LST,
+        lst_ca_2019_07$LST,
+        lst_ca_2019_08$LST,
+        lst_ca_2020_05$LST,
+        lst_ca_2020_06$LST,
+        lst_ca_2020_07$LST,
+        lst_ca_2020_08$LST)
+
+saveRDS(lst_ca_summer_months, "lst_ca_summer_months.rds")
+```
