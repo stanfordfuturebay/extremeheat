@@ -1,0 +1,304 @@
+---
+title: "UpdatedTMSmc"
+author: "Meg_Saunders"
+date: "05/05/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r libraries}
+library(remotes)
+install_github("yonghah/esri2sf")
+library(matrixStats)
+library(tidyverse)
+library(sf)
+library(leaflet)
+library(mapboxapi)
+library(tigris)
+library(jsonlite)
+library(esri2sf)
+library(raster)
+library(splancs)
+library(rgdal)
+```
+#updated version
+```{r}
+#yes use this 
+new_ten_models_max_temp_locas <- NULL
+
+for (row in 1:nrow(smc_locas)) {
+  first_gcm <-
+    ten_gcm_names[1]
+  
+  temp_df <-
+    fromJSON(
+      paste0(
+        "https://api.cal-adapt.org/api/series/tasmax_day_",
+        first_gcm,
+        "_rcp85/events/?g=",
+        smc_locas[row, ]$geometry %>%
+          st_centroid() %>%
+          st_as_text() %>%
+          str_replace_all(" ","+"),
+        "&stat=mean"
+      )
+    ) %>%
+    as.data.frame() %>%
+    rename(
+      date = "index",
+      max_temp = "data"
+    ) %>%
+    mutate(
+      id = smc_locas[row, ]$id,
+      max_temp = max_temp*9/5 - 459.67
+    ) %>%
+    dplyr::select(-name) %>%
+    .[, c(3,1,2)]
+  
+  names(temp_df)[names(temp_df) == "max_temp"] <- paste0(first_gcm,"_max_temp")
+  
+  for(gcm in 2:length(ten_gcm_names)) {
+    gcm_name <-
+      ten_gcm_names[gcm]
+    
+    gcm_temp <-
+      fromJSON(
+        paste0(
+          "https://api.cal-adapt.org/api/series/tasmax_day_",
+          gcm_name,
+          "_rcp85/events/?g=",
+          smc_locas[row, ]$geometry %>%
+            st_centroid() %>%
+            st_as_text() %>%
+            str_replace_all(" ","+"),
+          "&stat=mean"
+        )
+      ) %>%
+      as.data.frame() %>%
+      rename(
+        date = "index",
+        max_temp = "data"
+      ) %>%
+      mutate(
+        max_temp = max_temp*9/5 - 459.67
+      ) %>%
+      dplyr::select(-name)
+    
+    names(gcm_temp)[names(gcm_temp) == "max_temp"] <- paste0(gcm_name,"_max_temp") 
+    
+    temp_df <-
+      left_join(temp_df, gcm_temp)
+  }
+  
+  new_ten_models_max_temp_locas <-
+    rbind(new_ten_models_max_temp_locas, temp_df)
+  
+  if(row%%10 == 0) {
+    print(row)
+  }
+}
+```
+```{r}
+saveRDS(new_ten_models_max_temp_locas, "new_ten_models_max_temp_locas.rds")
+```
+```{r}
+new_ten_models_heat_by_year_locas <-
+  new_ten_models_max_temp_locas %>%
+  mutate(
+    year = substr(date,1,4)
+  )
+
+new_ten_model_hby_data_only <-
+  new_ten_models_heat_by_year_locas[3:12]
+```
+```{r}
+thresholds <- c(90, 95, 100, 105, 110)
+```
+```{r}
+new_ten_models_threshold_locas <- NULL
+for(threshold in 1:length(thresholds)) {
+  threshold_temp = paste0("above_", thresholds[threshold])
+  temp <- as.data.frame(threshold_temp)
+  for(col_name in colnames(new_ten_model_hby_data_only)) {
+    print(col_name)
+    col_temp <- new_ten_models_heat_by_year_locas[[col_name]]
+    
+    df_temp <- cbind(as.data.frame(col_temp), new_ten_models_heat_by_year_locas %>% dplyr::select(year, id))
+    
+    sum_temp <- df_temp %>%
+      group_by(year, id) %>%
+      summarize(
+        days_above_threshold =
+          sum(
+            col_temp > thresholds[threshold],
+            na.rm = T
+          )
+      )
+    
+    names(sum_temp)[names(sum_temp) == "days_above_threshold"] <-
+      paste0(unlist(strsplit(col_name, "_"))[1], "_days_above_threshold")
+    
+    if(col_name == "ACCESS1-0_max_temp") {
+      temp <- cbind(temp, sum_temp)
+    } else {
+      temp <- left_join(temp, sum_temp)
+    }
+    
+  }
+  new_ten_models_threshold_locas <-
+    rbind(new_ten_models_threshold_locas, temp)
+}
+```
+```{r}
+saveRDS(new_ten_models_threshold_locas, "Exheat_Spring/new_ten_models_threshold_locas.rds")
+```
+```{r}
+new_ten_models_exheat_locas_30 <-
+  new_ten_models_threshold_locas %>%
+  dplyr::filter(year <= "2045" & year >= "2016")
+```
+```{r}
+new_ten_models_exheat_locas_20s <-
+  new_ten_models_threshold_locas %>%
+  dplyr::filter(year <= "2029" & year >= "2020")
+```
+```{r}
+new_exheat_range_tm_30 <-
+  as.data.frame(
+    rowMaxs(data.matrix(new_ten_models_exheat_locas_30[4:13]))
+  ) %>%
+  rename(
+    tm_max = "rowMaxs(data.matrix(new_ten_models_exheat_locas_30[4:13]))"
+  ) %>%
+  cbind(
+    as.data.frame(
+      rowMins(data.matrix(new_ten_models_exheat_locas_30[4:13]))
+    )
+  ) %>%
+  rename(tm_min = "rowMins(data.matrix(new_ten_models_exheat_locas_30[4:13]))") %>%
+  cbind(
+    as.data.frame(
+      rowMeans(data.matrix(new_ten_models_exheat_locas_30[4:13]))
+    )
+  ) %>%
+  rename(tm_ave = "rowMeans(data.matrix(new_ten_models_exheat_locas_30[4:13]))") %>%
+  cbind(new_ten_models_exheat_locas_30[1:3], .)
+```
+```{r}
+new_exheat_range_tm_20s <-
+  as.data.frame(
+    rowMaxs(data.matrix(new_ten_models_exheat_locas_20s[4:13]))
+  ) %>%
+  rename(
+    tm_max = "rowMaxs(data.matrix(new_ten_models_exheat_locas_20s[4:13]))"
+  ) %>%
+  cbind(
+    as.data.frame(
+      rowMins(data.matrix(new_ten_models_exheat_locas_20s[4:13]))
+    )
+  ) %>%
+  rename(tm_min = "rowMins(data.matrix(new_ten_models_exheat_locas_20s[4:13]))") %>%
+  cbind(
+    as.data.frame(
+      rowMeans(data.matrix(new_ten_models_exheat_locas_20s[4:13]))
+    )
+  ) %>%
+  rename(tm_ave = "rowMeans(data.matrix(new_ten_models_exheat_locas_20s[4:13]))") %>%
+  cbind(new_ten_models_exheat_locas_20s[1:3], .)
+```
+```{r}
+new_exheat_tm_30yr_ave <-
+  new_exheat_range_tm_30 %>%
+  group_by(threshold_temp, id) %>%
+  summarise(
+    exheat_ave_tm = mean(tm_ave, na.rm = T),
+    exheat_max_tm = mean(tm_max, na.rm = T),
+    exheat_min_tm = mean(tm_min, na.rm = T)
+  )
+```
+```{r}
+new_exheat_tm_20s_ave <-
+  new_exheat_range_tm_20s %>%
+  group_by(threshold_temp, id) %>%
+  summarise(
+    exheat_ave_tm = mean(tm_ave, na.rm = T),
+    exheat_max_tm = mean(tm_max, na.rm = T),
+    exheat_min_tm = mean(tm_min, na.rm = T)
+  )
+```
+```{r}
+new_exheat_tm_30yr_ave_locas_sf <-
+  new_exheat_tm_30yr_ave %>%
+  left_join(smc_locas)
+```
+```{r}
+saveRDS(new_exheat_tm_30yr_ave_locas_sf, "new_exheat_tm_30yr_ave_locas_sf.rds")
+```
+
+```{r}
+new_exheat_tm_20s_ave_locas_sf <-
+  new_exheat_tm_20s_ave %>%
+  left_join(smc_locas)
+```
+```{r}
+cbgs <- readRDS("san_mateo_cbgs.rds")
+```
+```{r}
+leaflet() %>%
+  addTiles() %>%
+  addPolygons(data = new_exheat_tm_30yr_intersection %>% filter(threshold_temp == "above_100"),
+              fillOpacity = 0,
+              weight = 1)
+```
+```{r}
+new_exheat_tm_30yr_intersection <-
+  new_exheat_tm_30yr_ave_locas_sf %>%
+  st_as_sf() %>%
+  sf::st_transform(26910) %>%
+  st_intersection(cbgs %>% sf::st_as_sf() %>% sf::st_transform(26910)) %>% sf::st_as_sf() %>%
+  sf::st_transform("+init=epsg:4326")
+
+```
+```{r}
+new_exheat_tm_30yr_subset <-
+  new_exheat_tm_30yr_intersection %>%
+  mutate(
+    intersect_area = st_area(.),
+    numeric_intersect_area = as.numeric(intersect_area),
+    area_by_exheat_max = exheat_max_tm*numeric_intersect_area,
+    area_by_exheat_min = exheat_min_tm*numeric_intersect_area,
+    area_by_exheat_ave = exheat_ave_tm*numeric_intersect_area
+  ) %>%
+  group_by(
+    GEOID,
+    threshold_temp
+  ) %>%
+  summarize(
+    weighted_tm_max = sum(area_by_exheat_max, na.rm = T)/sum(numeric_intersect_area),
+    weighted_tm_min = sum(area_by_exheat_min, na.rm = T)/sum(numeric_intersect_area),
+    weighted_tm_ave = sum(area_by_exheat_ave, na.rm = T)/sum(numeric_intersect_area)
+  )
+```
+```{r}
+new_exheat_tm_30yr_thresholds <-
+  new_exheat_tm_30yr_subset %>%
+  st_set_geometry(NULL) %>%
+  select(GEOID, threshold_temp, weighted_tm_ave) %>%
+  mutate(
+    weighted_tm_ave = round(weighted_tm_ave, digits = 2)
+  )
+```
+```{r}
+saveRDS(new_exheat_tm_30yr_thresholds, "new_exheat_tm_30yr_thresholds.rds")
+```
+```{r}
+new_exheat_tm_30yr_100f <-
+  new_exheat_tm_30yr_subset %>%
+  filter(threshold_temp == "above_100")
+
+```
+```{r}
+cities <- readRDS("san_mateo_cities.rds")
+```

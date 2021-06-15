@@ -1,0 +1,357 @@
+---
+title: "22ModelsNetCDF"
+author: "Meg_Saunders"
+date: "03/05/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+library(ncdf4)
+library(ncdf4.helpers)
+library(PCICt)
+```
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+library(tidyverse)
+```
+```{r}
+test_nc_filepath <-
+  "22ModelsNC/tasmax_day_IPSL-CM5A-LR_rcp85_r1i1p1_20060101-20061231.LOCA_2016-04-02.16th.CA_NV.nc"
+```
+```{r}
+#official loop - just change the model name for different models (don't forget to load data into 22ModelsNC beforehand)
+model_name <- "IPSL-CM5A-LR"
+years <- 2020:2029
+model_data <- NULL
+for(year in years) {
+  temp_filename <- paste0("22ModelsNC/tasmax_day_",model_name,"_rcp85_r1i1p1_", year, "0101-",year,"1231.LOCA_2016-04-02.16th.CA_NV.nc")
+  temp_output <- nc_open(temp_filename)
+  temp_tasmax_array <- ncvar_get(temp_output,"tasmax")
+  options(digits = 10)
+  temp_lons <- data_frame(lon = as.vector(ncvar_get(temp_output, varid = "lon")))
+  temp_lats <- data_frame(lat = as.vector(ncvar_get(temp_output, varid = "lat")))
+  
+  temp_year_data <- NULL
+  
+  for (li in 1:nrow(smc_loca_centroids)) {
+    loca_lon <- as.numeric(st_coordinates(smc_loca_centroids[li,]$geometry)[1]) + 360
+    loca_lat <- as.numeric(st_coordinates(smc_loca_centroids[li,]$geometry)[2])
+    
+    lon_index <- which(temp_lons$lon == loca_lon)
+    lat_index <- which(temp_lats$lat == loca_lat)
+    temp_day_data <- as.data.frame("tasmax" <- temp_tasmax_array[lon_index,lat_index,]) %>%
+      mutate(tasmax = temp_tasmax_array[lon_index,lat_index,]) %>%
+      mutate(id = smc_loca_centroids[li,]$id) %>%
+      mutate(date = nc.get.time.series(temp_output, v = "tasmax", time.dim.name = "time")) %>%
+      dplyr::select(date,id,tasmax)
+    
+    temp_year_data <- rbind(temp_year_data, temp_day_data)
+  }
+  
+  model_data <- rbind(model_data, temp_year_data)
+}
+```
+```{r}
+model_data_test <-
+  model_data %>%
+  #dplyr::mutate(date_two = date) %>%
+  dplyr::mutate(year = substr(date,1,4)) %>%
+  mutate(tasmaxf = (tasmax - 273.15)*9/5 + 32) %>%
+  dplyr::select(-tasmax)
+```
+```{r}
+thresholds <- c(90,95,100,105,110)
+model_hby_test <-
+  model_data_test %>%
+  group_by(year,id)
+
+model_thresholds <- NULL
+for(threshold in 1:length(thresholds)) {
+  temp <- 
+    model_hby_test %>%
+    summarize(
+      threshold_temp = paste0("above_",thresholds[threshold]), 
+      days_above_threshold = sum(tasmaxf > thresholds[threshold],na.rm = T)
+    )
+  
+  model_thresholds <- rbind(model_thresholds,temp)
+}
+```
+```{r}
+model_thresholds_2020s <-
+  model_thresholds %>%
+  group_by(id,threshold_temp) %>%
+  summarize(
+    days_above_threshold = mean(days_above_threshold,na.rm = T)
+  )
+```
+```{r}
+smc_nonocean_centroids <- 
+  readRDS("SanMateo/smc_centroids_nonocean.rds") %>%
+  st_join(smc_loca_centroids) %>%
+  dplyr::select(-filename)
+```
+```{r}
+model_thresholds_nonocean <-
+  model_thresholds %>%
+  filter(id %in% smc_nonocean_centroids$id)
+```
+```{r}
+model_thresholds_smc_county_nonocean <-
+  model_thresholds_nonocean %>%
+  group_by(threshold_temp, year) %>%
+  summarize(days_above_threshold = mean(days_above_threshold, na.rm = T))
+```
+```{r}
+model_100f_smc_county_nonocean <-
+  model_thresholds_smc_county_nonocean %>%
+  filter(threshold_temp == "above_100")
+```
+```{r}
+ggplot(
+  model_100f_smc_county_nonocean,
+  aes(x = year)) + geom_line(
+    aes(y = as.numeric(days_above_threshold)), group = 1
+  ) + labs(
+    x = "Year",
+    y = "Number of days above 100F",
+    title = "Extreme Heat Days in San Mateo - IPSL-CM5A-LR"
+  )
+```
+```{r}
+model_name <- "IPSL-CM5A-LR"
+year <- "2020"
+test_generalized <-
+  paste0("22ModelsNC/tasmax_day_",model_name,"_rcp85_r1i1p1_", year, "0101-",year,"1231.LOCA_2016-04-02.16th.CA_NV.nc")
+test_generalized_output <- nc_open(test_generalized)
+
+```
+```{r}
+generalized_test_tas <- ncvar_get(test_generalized_output,"tasmax")
+```
+```{r}
+options(digits = 10)
+generalized_lons <- data_frame(lon = as.vector(ncvar_get(test_generalized_output, varid = "lon")))
+generalized_lats <- data_frame(lat = as.vector(ncvar_get(test_generalized_output, varid = "lat")))
+```
+```{r}
+generalized_year <- NULL
+for (li in 1:nrow(smc_loca_centroids)) {
+  loca_lon <- as.numeric(st_coordinates(smc_loca_centroids[li,]$geometry)[1]) + 360
+  loca_lat <- as.numeric(st_coordinates(smc_loca_centroids[li,]$geometry)[2])
+  
+  lon_index <- which(generalized_lons$lon == loca_lon)
+  lat_index <- which(generalized_lats$lat == loca_lat)
+  temp_data <- as.data.frame("tasmax" <- generalized_test_tas[lon_index,lat_index,]) %>%
+    mutate(tasmax = generalized_test_tas[lon_index,lat_index,]) %>%
+    mutate(id = smc_loca_centroids[li,]$id) %>%
+    mutate(date = nc.get.time.series(test_generalized_output, v = "tasmax", time.dim.name = "time")) %>%
+    dplyr::select(date,id,tasmax)
+  
+  generalized_year <- rbind(generalized_year, temp_data)
+}
+
+```
+```{r}
+colnames(generalized_year[1]) <- "tasmax"
+```
+```{r}
+generalized_year <- generalized_year %>% rename(tasmax = `generalized_test_tas[lon_index,lat_index,])`)
+```
+```{r}
+test_lon_str <- "241.6562"
+test_lat_str <- "37.78125"
+```
+```{r}
+generalized_tp <- as.data.frame(tasmax <- generalized_test_tas[which(lon_test, test_lon_str),which(lat_test,,]))
+```
+
+```{r}
+#set model name here(or maybe loop through)
+model_name <- "IPSL-CM5A-LR"
+
+#general reading loop
+years = 2020:2029
+
+for (year in years) {
+  filepath_temp <- paste0("22ModelsNC/tasmax_day_","_rcp85_r1i1p1_", year, "0101-",year,"1231.LOCA_2016-04-02.16th.CA_NV.nc")
+  
+  output_temp <- nc_open(filepath_temp)
+  
+  array_temp <- ncvar_get(test_nc_output, "tasmax")
+  
+  
+}
+```
+```{r}
+test_nc_output <- nc_open(test_nc_filepath)
+```
+```{r}
+year_test_nc_filepath <- "22ModelsNC/tasmax_day_IPSL-CM5A-LR_rcp85_r1i1p1_20200101-20201231.LOCA_2016-04-02.16th.CA_NV.nc"
+```
+```{r}
+year_test_nc_output <- nc_open(year_test_nc_filepath)
+```
+```{r}
+year_test_time <- data_frame(nc.get.time.series(year_test_nc_output,v="tasmax",time.dim.name = "time"))
+```
+```{r}
+smc_loca_centroid_strings <-
+  smc_locas %>%
+  st_centroid() %>%
+  st_coordinates() %>%
+  cbind(smc_locas %>%st_set_geometry(NULL),.) %>%
+  rename(
+    lon = "X",
+    lat = "Y"
+  )
+```
+```{r}
+test_last_nc_filepath <-
+  "22ModelsNC/tasmax_day_IPSL-CM5A-LR_rcp85_r1i1p1_21000101-21001231.LOCA_2016-04-02.16th.CA_NV.nc"
+```
+```{r}
+test_last_nc_output <- nc_open(test_last_nc_filepath)
+```
+```{r}
+test_time <- data_frame(nc.get.time.series(test_nc_output, v = "tasmax", time.dim.name = "time"))
+```
+```{r}
+test_last_time <- nc.get.time.series(test_last_nc_output, v = "tasmax", time.dim.name = "time")
+```
+```{r}
+test_tasmax.array <- ncvar_get(test_nc_output, "tasmax")
+```
+```{r}
+
+```
+```{r}
+#do this in a loop (for the number of rows)
+test_point <- as.data.frame(tasmax <- test_tasmax.array[100,100,])
+```
+```{r}
+test_for_na <- 
+  test_point %>%
+  filter(!is.na(tasmax))
+```
+```{r}
+test_centroid <- data_frame(tasmax = as.vector(nc.get.var.subset.by.axes(test_nc_output, "test_tasmax.array", axis.indices = list(X = "-122.5312", Y = "37.71875"))))
+```
+```{r}
+test_tasmax_two <- data_frame(tasmax = as.vector(nc.get.var.subset.by.axes(test_nc_output, "test_tasmax", axis.indices = list(X = long_test[20, ]$lon, Y = lat_test[20, ]$lat))))
+```
+```{r}
+test_tasmax_three <- data_frame(time = test_time, tasmax = as.vector(test_tasmax_two))
+```
+```{r}
+test_last_tasmax <- data_frame(as.vector(ncvar_get(test_last_nc_output, "tasmax")))
+```
+```{r}
+#there is an uneven number of longitudes and latitudes
+options(digits = 10)
+lon_test <- data_frame(lon = as.vector(ncvar_get(test_generalized_output, varid = "lon")))
+lat_test <- data_frame(lat = as.vector(ncvar_get(test_generalized_output, varid = "lat")))
+```
+```{r}
+saveRDS(lon_test, "lon_test.rds")
+saveRDS(lat_test, "lat_test.rds")
+```
+```{r}
+lon_test <- data.frame(lon = as.vector(ncvar_get(year_test_nc_output, varid = "lon")))
+```
+```{r}
+lon_last_test <- data_frame(lon = as.vector(ncvar_get(test_last_nc_output, varid = "lon")))
+lat_last_test <- data_frame(lat = as.vector(ncvar_get(test_last_nc_output, varid = "lat")))
+```
+```{r}
+#don't actually use this - just for testing; you want a matrix
+ll_cbind <- data_frame(cbind(lon_test, lat_test[1:179,]))
+```
+```{r}
+#don't use
+ll_sf <- 
+  ll_cbind %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
+  rotate()
+```
+```{r}
+smc_nc_test <-
+  ll_sf %>%
+  st_transform(4326) %>%
+  .[smc_boundary %>% st_transform(4326),]
+```
+```{r}
+#you should take the st_coordinates out of the mutate, and do it in a loop
+options(digits = 10)
+line_smc <-
+  smc_loca_centroids %>%
+  mutate(
+    lon = st_coordinates(geometry),
+    lat = st_coordinates(geometry,2)
+  ) #%>% 
+#filter(coords == "31.78125")
+#(grepl("31.78125", coords))
+```
+```{r}
+#don't use
+ll_sf_two <-
+  ll_cbind_two %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326)
+
+```
+```{r}
+ll_cbind_two <-
+  ll_cbind %>% 
+  mutate(lon = (lon-360))
+```
+```{r}
+test_coord_string <- 
+  paste0("c(",lon_test[1,]$lon, ",", lat_test[1,]$lat, ")")
+```
+```{r}
+test_coord <- st_as_sf(test_coord_string, wkt = "geometry")
+```
+```{r}
+dup_test <-
+  lon_test %>%
+  filter(!duplicated(lon))
+```
+#Get the centroids of the San Mateo Locas
+```{r}
+all_locas <- readRDS("all_locas.rds")
+```
+```{r}
+smc_boundary <- readRDS("SanMateo/san_mateo_boundary.rds")
+```
+```{r}
+smc_locas <- all_locas[smc_boundary, ]
+```
+```{r}
+smc_loca_centroids <- smc_locas %>% st_centroid()
+```
+```{r}
+saveRDS(smc_loca_centroids, "SanMateo/smc_loca_centroids.rds")
+```
+```{r}
+smc_loca_centroids <- readRDS("SanMateo/smc_loca_centroids.rds")
+```
+```{r}
+all_loca_centroids <- all_locas %>% st_centroid()
+```
+```{r}
+test_nc_df <-
+  data_frame(time = test_time, tasmax = as.vector(test_tasmax))
+```
+```{r}
+#this package was removed
+library(RCMIP5)
+```

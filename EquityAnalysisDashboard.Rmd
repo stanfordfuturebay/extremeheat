@@ -1,0 +1,157 @@
+---
+title: "San Mateo Extreme Heat Equity Analysis Dashboard"
+runtime: shiny
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    source_code: embed
+---
+
+<style>
+.datatables{
+overflow: auto;
+}
+</style>
+```{r global, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(htmltools)
+library(sf)
+library(leaflet)
+library(mapboxapi)
+smc_indicator_cbgs_2019 <- readRDS("Exheat_Spring/smc_indicator_cbgs_2019.rds")
+smc_thresholds_cbgs_df <- readRDS("SanMateo/new_exheat_tm_30yr_thresholds.rds")
+smc_thresholds_cbgs_df_max <- readRDS("SanMateo/new_exheat_tm_30yr_thresholds_max.rds")
+```
+Inputs {.sidebar}
+-------------------------------------
+**Directions** Select which indicators you would like to see compared with extreme heat. Select Threshold Temperature (degrees Fahrenheit). Select whether you want to use extreme heat projections summarized as a maximum or an average across the ten models. Wait a couple of seconds and the plot will update. Finally, select whether you want to compare different extreme heat ranges by actual population size or by proportional break down.
+```{r, context="server"}
+indicator_options = c("Race", "Income", "Ethnicity", "Age")
+selectInput(
+  "indicator",
+  label = "Indicator:",
+  choices = indicator_options,
+  selected = indicator_options[3]
+)
+```
+```{r, context="server"}
+threshold_options = c("90", "95", "100", "105", "110")
+selectInput(
+  "threshold",
+  label = "Temperature Threshold:",
+  choices = threshold_options,
+  selected = threshold_options[2]
+)
+```
+```{r}
+summary_options = c("Average of Climate Models","Maximum of Climate Models")
+selectInput(
+  "summary",
+  label = "Statistic Type: ",
+  choices = summary_options,
+  selected = summary_options[1]
+)
+```
+```{r}
+plot_options = c("Actual","Proportional")
+selectInput(
+  "plot_option",
+  label = "Plot Type: ",
+  choices = plot_options,
+  selected = plot_options[1]
+)
+```
+
+Row {data-height=600}
+-----------------------------------------------------------------------
+### {.no-padding}
+```{r}
+#plotOutput("plot")
+```
+
+```{r, context="server"}
+renderPlot({
+  variable <- input$indicator
+  threshold <- input$threshold
+  summary <- input$summary
+  plot_option <- input$plot_option
+  
+  smc_selected_threshold <-
+    smc_thresholds_cbgs_df %>%
+    dplyr::filter(threshold_temp %in% c(paste0("above_",threshold))) %>%
+    rename(
+      weighted_exheat = weighted_tm_ave,
+      geography_id = GEOID
+    )
+  
+  if(summary == "Maximum of Climate Models") {
+    smc_selected_threshold <-
+      smc_thresholds_cbgs_df_max %>%
+      dplyr::filter(threshold_temp %in% c(paste0("above_",threshold))) %>%
+      rename(
+        weighted_exheat = weighted_tm_max,
+        geography_id = GEOID
+      )
+  }
+  variable_exheat_cbgs <-
+    smc_indicator_cbgs_2019 %>%
+    dplyr::filter(indicator_name == variable) %>% 
+    left_join(smc_selected_threshold, by = c("CBG" = "geography_id")) %>%
+    dplyr::filter(!is.na(weighted_exheat))
+  
+  variable_exheat_quantiles <-
+    as.data.frame(quantile(variable_exheat_cbgs$weighted_exheat, seq(0,1,length.out = 6),na.rm = T))
+  colnames(variable_exheat_quantiles) <- "qt"
+  
+  variable_bin_names <-
+    c(paste0(round(variable_exheat_quantiles[2,],2), " or less"), paste0(round(variable_exheat_quantiles[2,],2)," to ",round(variable_exheat_quantiles[3,],2)), paste0(round(variable_exheat_quantiles[3,],2)," to ",round(variable_exheat_quantiles[4,],2)), paste0(round(variable_exheat_quantiles[4,],2)," to ",round(variable_exheat_quantiles[5,],2)),paste0(round(variable_exheat_quantiles[5,],2), " to ",round(variable_exheat_quantiles[6,],2)))
+  
+  variable_exbins <-
+    variable_exheat_cbgs %>%
+    mutate(
+      exheat_bin = case_when(
+        weighted_exheat <= variable_exheat_quantiles[2,] ~ variable_bin_names[1],
+        weighted_exheat > variable_exheat_quantiles[2,] & weighted_exheat <= variable_exheat_quantiles[3,] ~ variable_bin_names[2],
+        weighted_exheat > variable_exheat_quantiles[3,] & weighted_exheat <= variable_exheat_quantiles[4,] ~ variable_bin_names[3],
+        weighted_exheat > variable_exheat_quantiles[4,] & weighted_exheat <= variable_exheat_quantiles[5,] ~ variable_bin_names[4],
+        weighted_exheat > variable_exheat_quantiles[5,] ~ variable_bin_names[5]
+      )
+    )
+  
+  position_choice = "stack"
+  if(plot_option == "Proportional") {
+    position_choice = "fill"
+  }
+  
+  ggplot(
+    variable_exbins %>%
+      group_by(indicator, exheat_bin) %>%
+      summarize(estimate = sum(estimate))
+  ) + geom_bar(
+    aes(
+      x = exheat_bin %>% factor(levels = rev(variable_bin_names)),
+      y = estimate,
+      fill = indicator
+    ),
+    stat = "identity",
+    position = position_choice
+  ) +
+    labs(
+      x = paste0("Number of Days above ",threshold," degrees F"),
+      y = "Population",
+      title = paste0(variable," by extreme heat days (",threshold," degrees f)")
+    ) +
+    coord_flip() +
+    theme(
+      legend.position = "bottom",
+      legend.direction = "vertical"
+    )
+})
+```
+
+<!-- Row {data-height=400} -->
+<!-- ----------------------------------------------------------------------- -->
+
+<!-- ### {.no-padding} -->

@@ -1,0 +1,266 @@
+---
+title: "EquityAnalysisProcessing"
+author: "Meg_Saunders"
+date: "08/06/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+library(censusapi)
+```
+```{r}
+acs_vars_2019_5yr <-
+  listCensusMetadata(
+    name = "2019/acs/acs5",
+    type = "variables"
+  )
+
+saveRDS(acs_vars_2019_5yr, "acs_vars_2019_5yr.rds")
+options(tigris_use_cache = TRUE)
+```
+#Equity Analysis - Race Data
+```{r} 
+pop_by_race <-
+  1:6 %>%
+  map_dfr(function(x){
+    getCensus(
+      name = "acs/acs5",
+      vintage = 2019,
+      region = "block group:*",
+      regionin = "state:06+county:081",
+      vars = paste0("C02003_00",as.character(x+2),"E")
+    ) %>%
+      mutate(
+        cbg = paste0(state,county,tract,block_group)
+      ) %>%
+      dplyr::select(!c(state,county,tract,block_group) & !ends_with(c("EA","MA","M"))) %>%
+      pivot_longer(
+        ends_with("E"),
+        names_to = "variable",
+        values_to = "estimate"
+      ) %>%
+      left_join(
+        acs_vars_2018_5yr %>%
+          dplyr::select(name, label),
+        by = c("variable" = "name")
+      ) %>%
+      dplyr::select(-variable) %>%
+      separate(
+        label,
+        into = c(NA,NA,"race"),
+        sep = "!!"
+      ) %>%
+      filter(!is.na(census_race_labels[x])) %>%
+      mutate(race = census_race_labels[x])
+    
+  })
+```
+#Equity Analysis - Age Data
+```{r}
+county_name <- "San Mateo"
+city_name <- "East Palo Alto"
+state_id <- "06"
+county_id <- "081"
+
+county <-
+  counties("CA", cb = T, progress_bar = F) %>%
+  filter(NAME == county_name) %>%
+  st_transform(4326)
+
+cbgs <- 
+  block_groups(state_id, county_id, cb = T, progress_bar = F) %>%
+  st_set_geometry(NULL) %>% 
+  left_join(
+    block_groups(state_id, county_id, cb = T, progress_bar = F) %>% dplyr::select(GEOID)
+  ) %>% 
+  st_as_sf() %>% 
+  dplyr::select(CBG = GEOID) %>% 
+  arrange(CBG) %>% 
+  left_join(
+    getCensus(
+      name = "acs/acs5",
+      vintage = 2019,
+      region = "block group:*",
+      regionin = paste0("state:",state_id,"+county:",county_id),
+      vars = "B01001_001E"
+    ) %>% 
+      transmute(
+        CBG = paste0(state,county,tract,block_group),
+        POP = B01001_001E
+      )
+  ) %>% 
+  st_transform(26910) %>% 
+  mutate(original_area = st_area(.))
+```
+```{r}
+cbgs_age_2019 <-
+  getCensus(
+    name = "acs/acs5",
+    vintage = 2019,
+    region = "block group:*",
+    regionin = paste0("state:",state_id,"+county:",county_id),
+    vars = c(
+      "B01001_001E", # Population
+      "B01001_020E", # 65 years and over
+      "B01001_021E", 
+      "B01001_022E", 
+      "B01001_023E", 
+      "B01001_024E", 
+      "B01001_025E", 
+      "B01001_044E", 
+      "B01001_045E", 
+      "B01001_046E", 
+      "B01001_047E", 
+      "B01001_048E", 
+      "B01001_049E", 
+      "B01001_003E", # Under 18 years
+      "B01001_004E", 
+      "B01001_005E", 
+      "B01001_006E", 
+      "B01001_027E", 
+      "B01001_028E", 
+      "B01001_029E", 
+      "B01001_030E"
+    )
+  ) %>%
+  mutate(CBG = paste0(state,county,tract,block_group)) %>%
+  dplyr::filter(
+    CBG %in% cbgs$CBG
+  ) %>%
+  transmute(
+    CBG,
+    EP_AGE65 = (
+      B01001_020E +
+        B01001_021E +
+        B01001_022E +
+        B01001_023E +
+        B01001_024E +
+        B01001_025E +
+        B01001_044E +
+        B01001_045E +
+        B01001_046E +
+        B01001_047E +
+        B01001_048E +
+        B01001_049E
+    ),
+    EP_AGE17 = (
+      B01001_003E +
+        B01001_004E +
+        B01001_005E +
+        B01001_006E +
+        B01001_027E +
+        B01001_028E +
+        B01001_029E +
+        B01001_030E
+    ),
+    EP_AGE18TO64 = B01001_001E - (EP_AGE17 + EP_AGE65)
+  ) %>%
+  pivot_longer(
+    starts_with("EP"),
+    names_to = "age",
+    values_to = "population")
+```
+#Equity Analysis - Ethnicity Data
+```{r}
+smc_ethnicity_pop_cbg <-
+  getCensus(
+    name = "acs/acs5",
+    vintage = 2019,
+    region = "block group:*",
+    regionin = paste0("state:",state_id,"+county:",county_id),
+    vars = c(
+      "B03003_002E",
+      "B03003_003E"
+    )
+  ) %>%
+  mutate(
+    CBG = paste0(state,county,tract,block_group)
+  ) %>%
+  dplyr::select(!c(state,county,tract,block_group) & !ends_with(c("EA","M","MA"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2019_5yr %>%
+      dplyr::select(name, label),
+    by = c("variable" = "name")
+  ) %>%
+  dplyr::select(-variable) %>%
+  separate(
+    label,
+    into = c(NA,NA,"ethnicity"),
+    sep = "!!"
+  )
+```
+#Equity Analysis - Income (Poverty/Not Poverty) Data
+```{r}                               
+smc_income_2019 <-
+  getCensus(
+    name = "acs/acs5",
+    vintage = 2019,
+    region = "block group:*",
+    regionin = paste0("state:",state_id,"+county:",county_id),
+    vars = c("B17010_002E","B17010_001E")
+  ) %>%
+  mutate(
+    CBG = paste0(state,county,tract,block_group),
+    NOT_POVERTY = B17010_001E-B17010_002E
+  ) %>%
+  rename(POVERTY = B17010_002E, TOTAL = B17010_001E) %>%
+  dplyr::select(-state,-county,-tract,-block_group, -TOTAL) %>%
+  pivot_longer(
+    c(NOT_POVERTY,POVERTY),
+    names_to = "variable",
+    values_to = "estimate"
+  )
+```
+#Aggregation
+```{r}
+smc_ethnicity_cbgs_2019 <-
+  smc_ethnicity_pop_cbg %>%
+  .[c(1,3,2)] %>%
+  mutate(indicator_name = "Ethnicity") %>%
+  rename(indicator = "ethnicity")
+print(colnames(smc_ethnicity_cbgs_2019))
+```
+```{r}
+smc_race_cbgs_2019 <-
+  pop_by_race %>%
+  .[c(1,3,2)] %>%
+  mutate(indicator_name = "Race") %>%
+  rename(indicator = "race") %>%
+  rename(CBG = "cbg")
+print(colnames(smc_race_cbgs_2019))
+```
+```{r}
+smc_age_cbgs_2019 <-
+  cbgs_age_2019 %>%
+  mutate(indicator_name = "Age") %>%
+  rename(indicator = "age") %>%
+  rename(estimate = "population")
+print(colnames(smc_age_cbgs_2019))
+```
+```{r}
+smc_income_cbgs_2019 <-
+  smc_income_2019 %>%
+  mutate(indicator_name = "Income") %>%
+  rename(indicator = "variable")
+print(colnames(smc_income_cbgs_2019))
+```
+```{r}
+smc_indicator_cbgs_2019 <-
+  rbind(
+    smc_race_cbgs_2019,
+    smc_age_cbgs_2019,
+    smc_ethnicity_cbgs_2019,
+    smc_income_cbgs_2019
+  )
+```
+```{r}
+saveRDS(smc_indicator_cbgs_2019,"Exheat_Spring/smc_indicator_cbgs_2019.rds")
+```

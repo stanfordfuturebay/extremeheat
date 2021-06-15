@@ -1,0 +1,251 @@
+---
+title: "San Mateo County Extreme Heat Dashboard"
+#runtime: shiny
+#output:
+  #flexdashboard::flex_dashboard:
+    #orientation: rows
+    #vertical_layout: fill
+    #source_code: embed
+---
+
+<style>
+.datatables{
+overflow: auto;
+}
+</style>
+
+```{r global, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(htmltools)
+library(sf)
+library(leaflet)
+library(mapboxapi)
+
+san_mateo_cbgs <- readRDS("san_mateo_cbg.rds")
+san_mateo_boundary <- readRDS("san_mateo_boundary.rds")
+smc_thresholds_cbgs_df <- readRDS("new_exheat_tm_30yr_thresholds.rds")
+smc_thresholds_cbgs_df_max <- readRDS("new_exheat_tm_30yr_thresholds_max.rds")
+san_mateo_cities <- readRDS("smc_city_buff.rds")
+smc_thresholds_city_df <- readRDS("new_exheat_tm_30yr_thresholds_city.rds")
+smc_threshold_city_df_max <- readRDS("new_exheat_tm_30yr_thresholds_city_max.rds")
+smc_thresholds_cbgs_sf <-
+  smc_thresholds_cbgs_df %>%
+  left_join(san_mateo_cbgs %>% dplyr::select(GEOID)) %>%
+  st_as_sf() %>%
+  st_transform(4326)
+smc_thresholds_cbgs_max_sf <-
+  smc_thresholds_cbgs_df_max %>%
+  left_join(san_mateo_cbgs %>% dplyr::select(GEOID)) %>%
+  st_as_sf() %>%
+  st_transform(4326)
+smc_thresholds_city_sf <-
+  smc_thresholds_city_df %>%
+  left_join(san_mateo_cities %>% dplyr::select(NAME)) %>%
+  st_as_sf() %>%
+  st_transform(4326)
+smc_thresholds_city_max_sf <-
+  smc_threshold_city_df_max %>%
+  left_join(san_mateo_cities %>% dplyr::select(NAME)) %>%
+  st_as_sf() %>%
+  st_transform(4326)
+```
+Inputs {.sidebar}
+-------------------------------------
+**Directions** - Select which geography type you would like to see the extreme heat data disaggregated to. Select Threshold Temperature (degrees Fahrenheit). Wait a couple of seconds, and the map will update. To view temperature data disaggregated to the city level, select the "By City" tab. To view temperature data disaggreagated to the Census Block Group level, select the "By Census Block Group" tab. Finally, select whether you want to see the extreme heat day projections summarized as a maximum or an average across all ten models.
+
+```{r, context="server"}
+threshold_options = c("90", "95", "100", "105", "110")
+selectInput(
+  "threshold",
+  label = "Temperature Threshold:",
+  choices = threshold_options,
+  selected = threshold_options[2]
+)
+```
+```{r}
+geography_options = c("Census Block Group", "City")
+selectInput(
+  "geography",
+  label = "Geography: ",
+  choices = geography_options,
+  selected = geography_options[1]
+)
+```
+```{r}
+summary_options = c("Average of Climate Models","Maximum of Climate Models")
+selectInput(
+  "summary",
+  label = "Statistic Type: ",
+  choices = summary_options,
+  selected = geography_options[1]
+)
+```
+**Map** - These maps of San Mateo County color selected regions based on the number of days per year predicted to have a max temperature at or above the temperature specified, across the 2020s.
+
+**About the data** - The maximum daily temperature predictions are from [CalAdapt](https://cal-adapt.org/data/download/), published by the Scripps Institution of Oceanography. The specific models used include: HadGEM2-ES, CNRM-CM5, CanESM2, MIROC5, ACCESS1-0, CCSM4, CESM1-BGC, CMCC-CMS, GFDL-CM3, HadGEM2-CC. The forecasts used in this tool take the mean, and optionally the maximum, of the projected number of extreme heat days across all ten models.
+
+Row {data-height=600}
+-----------------------------------------------------------------------
+
+### {.no-padding}
+
+```{r}
+leafletOutput("map")
+```
+```{r, context="server"}
+#default_geog <- "Census Block Group"
+default_summary <- "Average of Climate Models"
+default <- 95
+smc_default_threshold <-
+  smc_thresholds_cbgs_sf %>%
+  filter(threshold_temp %in% c(paste0("above_", default))) %>%
+  rename(
+    weighted_exheat = weighted_tm_ave,
+    geography_id = GEOID
+  ) %>%
+  st_as_sf()
+
+heat_pal <- colorNumeric(
+  palette = "Reds",
+  domain = smc_default_threshold$weighted_exheat
+)
+output$map <- renderLeaflet({
+  leaflet() %>%
+    addMapboxTiles(
+      style_id = "streets-v11",
+      username = "mapbox",
+      access_token = "pk.eyJ1IjoibXNhdW5kZTIiLCJhIjoiY2tqenhlOTQ1MGJ2dzJvcnV3ZnA3eXdnaCJ9.3J2jMPRqbFu8cX1VjT_gDA"
+    ) %>%
+    addPolygons(
+      data = san_mateo_boundary,
+      fill = F,
+      color = "black",
+      weight = 1
+    ) %>% 
+    addPolygons(
+      data = smc_default_threshold,
+      fillColor = ~heat_pal(weighted_exheat),
+      fillOpacity = 0.5,
+      color = "white",
+      weight = 0.5,
+      label = ~lapply(paste0(geography_id, ": ", round(weighted_exheat), " days per year with a maximum<br>temperature above ", default, " over the next decade"),HTML),
+      highlightOptions = highlightOptions(
+        weight = 2,
+        opacity = 1
+      ),
+      layerId = ~geography_id,
+      group = "GBG"
+    ) %>%
+    addLegend(
+      data = smc_default_threshold,
+      pal = heat_pal,
+      values = ~weighted_exheat,
+      title = ~paste0("Number of days<br>with max temperature<br>above ",default, " per year <br>over next decade"),
+      layerId = "legend"
+    )
+})
+```
+```{r, context="server"}
+observeEvent({
+  input$geography
+  input$threshold
+  input$summary
+},{
+  geography <- input$geography
+  threshold <- input$threshold
+  summary <- input$summary
+  
+  smc_selected_threshold <-
+    smc_thresholds_cbgs_sf %>%
+    filter(threshold_temp %in% c(paste0("above_", threshold))) %>%
+    rename(
+      weighted_exheat = weighted_tm_ave,
+      geography_id = GEOID
+    ) %>%
+    st_as_sf()
+  
+  group_to_hide <- "City"
+  group_to_show <- "CBG"
+  
+  if(summary == "Average of Climate Models") {
+    if(geography == "City") {
+      smc_selected_threshold <-
+        smc_thresholds_city_sf %>%
+        filter(threshold_temp %in% c(paste0("above_", threshold))) %>%
+        rename(
+          weighted_exheat = weighted_tm_ave,
+          geography_id = NAME
+        ) %>%
+        st_as_sf()
+      
+      group_to_hide <- "CBG"
+      group_to_show <- "City"
+    }
+  } else {
+    smc_selected_threshold <-
+      smc_thresholds_cbgs_max_sf %>%
+      filter(threshold_temp %in% c(paste0("above_", threshold))) %>%
+      rename(
+        weighted_exheat = weighted_tm_max,
+        geography_id = GEOID
+      ) %>%
+      st_as_sf() %>%
+      st_transform(4326)
+    
+    group_to_hide <- "City"
+    group_to_show <- "CBG"
+    
+    if(geography == "City") {
+      smc_selected_threshold <-
+        smc_thresholds_city_max_sf %>%
+        filter(threshold_temp %in% c(paste0("above_", threshold))) %>%
+        rename(
+          weighted_exheat = weighted_tm_max,
+          geography_id = NAME
+        ) %>%
+        st_as_sf() %>%
+        st_transform(4326)
+      
+      group_to_hide <- "CBG"
+      group_to_show <- "City"
+    }
+  }
+  new_heat_pal <- colorNumeric(
+    palette = "Reds",
+    domain = smc_selected_threshold$weighted_exheat
+  )
+  
+  leafletProxy("map") %>%
+    hideGroup(group_to_hide) %>%
+    showGroup(group_to_show) %>%
+    removeControl(layerId = "legend") %>%
+    addPolygons(
+      data = smc_selected_threshold %>% st_transform(4326),
+      fillColor = ~new_heat_pal(weighted_exheat),
+      fillOpacity = 0.5,
+      color = "white",
+      weight = 0.5,
+      label = ~lapply(paste0(geography_id, ": ", round(weighted_exheat), " days per year with a maximum<br>temperature above ", threshold, " over the next decade"),HTML),
+      highlightOptions = highlightOptions(
+        weight = 2,
+        opacity = 1
+      ),
+      layerId = ~geography_id,
+      group = group_to_show
+    ) %>%
+    addLegend(
+      data = smc_selected_threshold,
+      pal = new_heat_pal,
+      values = ~weighted_exheat,
+      title = ~paste0("Number of days<br>with max temperature<br>above ",threshold, " per year <br>over next decade"),
+      layerId = "legend"
+    )
+})
+```
+
+<!-- Row {data-height=400} -->
+<!-- ----------------------------------------------------------------------- -->
+
+<!-- ### {.no-padding} -->
+
